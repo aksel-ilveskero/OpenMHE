@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+
+# Acados / OpenMHE runtime artifacts
+mhe_json/
+c_generated_code/
+.openmhe/
+
+# Demo outputs
+mhe_results.png
+examples/mhe_results.png
+
+# IDE
+.idea/
+.vscode/
+*.swp

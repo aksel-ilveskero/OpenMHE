@@ -1,0 +1,38 @@
+# DONE
+- Creating solver from state space
+- Objective function building logic
+- Process error (ProcessTerm)
+- Measurement error term (MeasurementTerm)
+- Input measurement error term (InputTrackingTerm)
+- Building noise matrices from user input
+- Running the solver
+- Penalty functions
+    - BasePenalty
+    - L1 penalty
+    - L2 penalty
+    - Huber penalty
+    - Deadzone penalty
+- Input regulating term
+    - First difference
+    - Second difference
+    - Random walk
+
+# TODO
+- Input regulating term
+    - Custom input format
+
+- Secondary PI loop for unknown inputs
+
+- Hard constraints for physically impossible solutions
+- Soft constraints for infeasable solutions
+- Slew rates for states as well
+
+- Arrival costs
+    - Simple
+    - EKF
+    - UKF
+
+- Parameter estimation
+- Support for multi-rate sensors
+
+- C code creator for faster overhead
