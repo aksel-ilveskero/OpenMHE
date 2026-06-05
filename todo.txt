@@ -5,7 +5,7 @@
 - Measurement error term (MeasurementTerm)
 - Input measurement error term (InputTrackingTerm)
 - Building noise matrices from user input
-- Running the solver
+- Running the solver (Python run_solver)
 - Penalty functions
     - BasePenalty
     - L1 penalty
@@ -16,23 +16,42 @@
     - First difference
     - Second difference
     - Random walk
+- Arrival costs (Python)
+    - Steady-state / fixed P
+    - EKF (dynamic P, precomputed for C driver)
+- C sliding-window MHE driver (run_c_solver / run_loop.c)
+    - Pointer-shifted yrefs, stack buffers sized from codegen
+    - Python EKF arrival pre-pass (x_bar, W0 per window)
+    - Bulk warm-start: ocp_nlp_get_all + memmove + set_all
+    - Input pins (lbu/ubu) only when values change
+    - Rebuild when acados header dimensions change (no stale NX)
+    - post_steps hook (e.g. PI observer in ot_4_disk)
+- filter_arrival.c: EKF/UKF + Cholesky utilities (unit tests only)
 
 # TODO
 - Input regulating term
     - Custom input format
 
 - Secondary PI loop for unknown inputs
+    - PILoadObserver + post_steps in ot_4_disk (done); generalize / document?
 
 - Hard constraints for physically impossible solutions
 - Soft constraints for infeasable solutions
 - Slew rates for states as well
 
 - Arrival costs
-    - Simple
-    - EKF
-    - UKF
+    - UKF in run_c_solver (use run_solver for UKF until in-C filter is fixed at scale)
+    - Optional: in-C incremental EKF (currently wrong at ot_22 scale; Python precompute is the path)
+
+- Real-time performance (target: solve + overhead < dt, ~1 ms on ot_22)
+    - Bottleneck is Acados SQP-RTI solve (~1.8 ms/window), not C loop setup/shift
+    - Exploit LTI + LINEAR_LS structure: reused KKT / Riccati instead of full condensing each window
+    - Smaller QP if acceptable: fewer augmented regulator states, horizon tuning
+    - Minor: hpipm_mode=SPEED_ABS, qp_solver_cond_N experiments (~5–10% seen)
 
 - Parameter estimation
 - Support for multi-rate sensors
 
-- C code creator for faster overhead
+- C driver polish (low priority; microsecond-scale)
+    - In-place warm-start via blasfeo_dveccp on nlp_out->ux (uniform nx/nu assumed)
+    - OPENMHE_PROFILE builds for setup/solve/shift breakdown

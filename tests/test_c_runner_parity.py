@@ -1,0 +1,56 @@
+"""Python vs C sliding-window MHE driver parity."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+import openmhe as mhe
+
+
+def _tiny_system():
+    A = np.array([[0.9, 0.0], [0.0, 0.8]])
+    B = np.array([[0.1, 0.0], [0.0, 0.05]])
+    C = np.array([[1.0, 0.0]])
+    D = np.zeros((1, 2))
+    return mhe.SystemModel.from_matrices(A, B, C, D, is_discrete=True, dt=0.01)
+
+
+def _tiny_objective(system, arrival_factory):
+    obj = mhe.ObjectiveBuilder()
+    obj.add(mhe.MeasurementTerm(mhe.L2Penalty(), mhe.NoiseWeight(1, cov=0.1)))
+    obj.add(mhe.ProcessTerm(mhe.L2Penalty(), mhe.NoiseWeight(2, cov=0.01)))
+    obj.add(mhe.KnownInput([0, 1]))
+    obj.add(arrival_factory(system, obj))
+    return obj
+
+
+@pytest.mark.parametrize(
+    "arrival_factory",
+    [
+        lambda s, o: mhe.SteadyStateArrivalCost(),
+        lambda s, o: mhe.EKFArrivalCost(s, builder=o),
+    ],
+    ids=["steady", "ekf"],
+)
+def test_c_solver_matches_python(arrival_factory):
+    pytest.importorskip("acados_template")
+    system = _tiny_system()
+    obj = _tiny_objective(system, arrival_factory)
+    N = 5
+    solver = mhe.build_mhe_solver(
+        system, N, obj, dt=0.01, already_discrete=True
+    )
+    rng = np.random.default_rng(1)
+    n_steps = N + 12
+    y = rng.normal(size=(system.ny, n_steps))
+    u = rng.normal(size=(system.nu, n_steps))
+
+    u_py, x_py = mhe.run_solver(solver, y, u)
+    u_c, x_c = mhe.run_c_solver(solver, y, u, rebuild=True)
+
+    mask = np.isfinite(u_py) & np.isfinite(u_c)
+    assert np.any(mask), "no finite estimates to compare"
+    np.testing.assert_allclose(u_c[mask], u_py[mask], rtol=1e-5, atol=1e-5)
+    mask_x = np.isfinite(x_py) & np.isfinite(x_c)
+    np.testing.assert_allclose(x_c[mask_x], x_py[mask_x], rtol=1e-4, atol=0.05)

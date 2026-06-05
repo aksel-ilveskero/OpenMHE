@@ -378,6 +378,7 @@ def build_mhe_solver(
     ocp.solver_options.tf = N_horizon * dt
     ocp.solver_options.integrator_type = "DISCRETE"
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
+    ocp.solver_options.hpipm_mode = 'SPEED_ABS'
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     _configure_nlp_solver(
         ocp,
@@ -437,6 +438,7 @@ def build_mhe_solver(
         slice(n_residual, n_residual + nx_base) if arrival_slice is not None else None
     )
     solver._dt = dt
+    solver._system = mhe_system
     return solver
 
 

@@ -43,7 +43,7 @@ from .mhe_strategies import (
     ProcessTerm,
     steady_state_cov,
 )
-from .builder import WindowStep, build_mhe_solver, run_solver
+from .builder import WindowStep, build_mhe_solver, run_c_solver, run_solver
 from .export import LatexSymbols, objective_to_latex
 from .paths import get_codegen_dir, get_data_root, get_mhe_json_dir, mhe_json_path
 from .frontend.acados_runtime import ensure_acados_environment
@@ -64,6 +64,7 @@ __all__ = [
     "WindowStep",
     "build_mhe_solver",
     "run_solver",
+    "run_c_solver",
     "get_data_root",
     "get_mhe_json_dir",
     "get_codegen_dir",

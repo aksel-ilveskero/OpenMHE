@@ -174,7 +174,7 @@ def main():
     )
 
     mhe_objective.add(mhe.KnownInput([0]))
-    mhe_objective.add(mhe.UKFArrivalCost(mhe_system, builder=mhe_objective))
+    mhe_objective.add(mhe.EKFArrivalCost(mhe_system, builder=mhe_objective))
 
     # PI observer: reads shaft-3 torque (x[2]) and disk-4 velocity (x[6])
     # directly from the MHE state to reconstruct the load on disk 4.
@@ -198,11 +198,11 @@ def main():
         already_discrete=True,
     )
 
-    print("Running MHE...")
+    print("Running MHE (C solver, -O3 -march=native -ffast-math)...")
     t_mhe_start = time.perf_counter()
-    u_hat, x_hat = mhe.run_solver(solver, y, u, post_steps=[pi_observer])
+    u_hat, x_hat = mhe.run_c_solver(solver, y, u, post_steps=[pi_observer])
     t_mhe_elapsed = time.perf_counter() - t_mhe_start
-    print(f"MHE solver time: {t_mhe_elapsed:.3f} s")
+    print(f"MHE solver time (C): {t_mhe_elapsed:.3f} s")
 
     # run_solver reports u/x at the last stage of each window (time index k-1).
     t_est = t[n_window - 1 : n_window - 1 + u_hat.shape[1]]

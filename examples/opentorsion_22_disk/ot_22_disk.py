@@ -283,7 +283,7 @@ if __name__ == "__main__":
 
     W_COV = 0.01
     V_COV = 0.5
-    LOAD_LAMBDA = 100
+    LOAD_LAMBDA = 10
 
     for sensor_config in sensor_configs:
         measured_states = [state_index_connection[sensor] for sensor in sensor_config]
@@ -325,7 +325,7 @@ if __name__ == "__main__":
         )
 
         mhe_objective.add(
-                mhe.InputSecondDiffReg(target_idx=[1], lambda_u=LOAD_LAMBDA),
+                mhe.InputRandomWalk(target_idx=[1], lambda_u=LOAD_LAMBDA),
             )
 
         if "input" in sensor_config:
@@ -334,7 +334,7 @@ if __name__ == "__main__":
             )
         else:
             mhe_objective.add(
-                mhe.InputSecondDiffReg(target_idx=[0], lambda_u=LOAD_LAMBDA)
+                mhe.InputRandomWalk(target_idx=[0], lambda_u=LOAD_LAMBDA)
             )
 
         mhe_objective.add(mhe.EKFArrivalCost(mhe_system, builder=mhe_objective))
@@ -348,11 +348,11 @@ if __name__ == "__main__":
             already_discrete=True,
         )
 
-        print("Running MHE...")
+        print("Running MHE (C solver, -O3 -march=native -ffast-math)...")
         t_mhe_start = time.perf_counter()
-        u_hat, x_hat = mhe.run_solver(solver, y, u)
+        u_hat, x_hat = mhe.run_c_solver(solver, y, u)
         t_mhe_elapsed = time.perf_counter() - t_mhe_start
-        print(f"MHE solver time: {t_mhe_elapsed:.3f} s")
+        print(f"MHE solver time (C): {t_mhe_elapsed:.3f} s")
 
         # run_solver returns estimates at the last stage of each window (index k-1).
         n_est = x_hat.shape[1]

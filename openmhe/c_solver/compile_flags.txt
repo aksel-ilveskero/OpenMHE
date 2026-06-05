@@ -1,0 +1,8 @@
+-I../../c_generated_code
+-I/home/aksel/Code/acados/include
+-I/home/aksel/Code/acados/include/acados
+-I/home/aksel/Code/acados/include/blasfeo/include
+-I/home/aksel/Code/acados/include/hpipm/include
+-O3
+-march=native
+-ffast-math
