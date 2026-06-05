@@ -7,6 +7,7 @@ import numpy as np
 import scipy.signal as signal
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
+from openmhe.frontend.system import SystemModel
 from openmhe.mhe_strategies import ObjectiveBuilder
 from openmhe.frontend.acados_runtime import acados_root, ensure_acados_environment
 from openmhe.paths import get_codegen_dir, mhe_json_path
@@ -80,10 +81,7 @@ def _build_yref_stack(builder, y_meas, u_known, nx_base, nu, nw):
 
 
 def build_mhe_solver(
-    A,
-    B,
-    C,
-    D,
+    mhe_system: SystemModel,
     N_horizon,
     builder: ObjectiveBuilder,
     dt: float = 0.001,
@@ -105,10 +103,10 @@ def build_mhe_solver(
     validate_term_penalties(builder)
     ensure_acados_environment()
 
-    A = np.asarray(A, dtype=float)
-    B = np.asarray(B, dtype=float)
-    C = np.asarray(C, dtype=float)
-    D = np.asarray(D, dtype=float) if D is not None else np.zeros((C.shape[0], B.shape[1]))
+    A = np.asarray(mhe_system.A, dtype=float)
+    B = np.asarray(mhe_system.B, dtype=float)
+    C = np.asarray(mhe_system.C, dtype=float)
+    D = np.asarray(mhe_system.D, dtype=float) if mhe_system.D is not None else np.zeros((C.shape[0], B.shape[1]))
 
     nx_base = A.shape[0]
     nu = B.shape[1]

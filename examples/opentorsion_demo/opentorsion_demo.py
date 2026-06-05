@@ -14,11 +14,7 @@ import openmhe as mhe
 W_COV = 0.001
 V_COV = 0.2
 # Inverse penalty strength on load random walk (larger => smoother load estimate).
-LOAD_RW_LAMBDA = 10.0
-
-# Small cov => STRONG tracking (weight ~ 1/cov), not "no penalty".
-MOTOR_TRACK_COV = 1e-8
-USE_MOTOR_TRACKING = False
+LOAD_LAMBDA = 10.0
 
 
 def simulate(test_bench: TestBench, dt: float, t_end: float):
@@ -69,15 +65,8 @@ def main():
     n_window = 50
     ny, nx, nu = mhe_system.ny, mhe_system.nx, mhe_system.nu
 
-    Q = W_COV * np.eye(nx)
-    R = V_COV * np.eye(ny)
-    P_arrival = steady_state_arrival_cov(
-        test_bench.A, test_bench.B, test_bench.C, test_bench.D, dt, Q, R
-    )
-
     mhe_objective = mhe.ObjectiveBuilder()
     meas_cov, proc_cov = V_COV, W_COV
-    P_use = P_arrival
 
     mhe_objective.add(
         mhe.MeasurementTerm(
@@ -92,30 +81,17 @@ def main():
         )
     )
     mhe_objective.add(
-        mhe.InputRandomWalk(target_idx=[1], lambda_u=LOAD_RW_LAMBDA),
+        mhe.InputRandomWalk(target_idx=[1], lambda_u=LOAD_LAMBDA),
     )
 
-    if USE_MOTOR_TRACKING:
-        mhe_objective.add(
-            mhe.InputTrackingTerm(
-                [0],
-                mhe.NoiseWeight(dim=1, cov=MOTOR_TRACK_COV),
-                reference="measured",
-            ),
-        )
-    else:
-        mhe_objective.add(mhe.KnownInput([0]))
+    mhe_objective.add(mhe.KnownInput([0]))
 
     print("Compiling ACADOS solver...")
     solver = mhe.build_mhe_solver(
-        mhe_system.A,
-        mhe_system.B,
-        mhe_system.C,
-        mhe_system.D,
+        mhe_system,
         n_window,
         mhe_objective,
         dt=dt,
-        P_arrival=P_use,
         already_discrete=True,
     )
 
@@ -178,29 +154,7 @@ def main():
     axes[-1, 1].set_xlabel("Time (s)")
     fig.suptitle("MHE: load torque and selected states", y=1.002)
     fig.tight_layout()
-    fig.savefig("mhe_results.png", dpi=150, bbox_inches="tight")
-    print(f"Saved mhe_results.png  |  load RMSE = {load_rmse:.4f}")
-
-    valid = np.isfinite(u_load_est)
-    u_load_filt = lowpass_filtfilt(u_load_est[valid], dt, cutoff_hz=5.0, order=4)
-    t_filt = t_est[valid]
-    filt_rmse = np.sqrt(np.nanmean((u_load_filt - u_load_true[valid]) ** 2))
-
-    fig_filt, ax = plt.subplots(figsize=(10, 3.5))
-    ax.plot(t_est, u_load_true, "k-", label="True load", linewidth=1.2)
-    ax.plot(t_est, u_load_est, color="C0", alpha=0.45, linewidth=1, label="MHE estimate")
-    ax.plot(t_filt, u_load_filt, "r-", linewidth=1.5, label="MHE + filtfilt")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Load torque")
-    ax.set_title(f"Load torque (filtfilt low-pass, fc=15 Hz)  |  RMSE = {filt_rmse:.4f}")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    fig_filt.tight_layout()
-    fig_filt.savefig("load_torque_filtfilt.png", dpi=150, bbox_inches="tight")
-    print(f"Saved load_torque_filtfilt.png  |  filtered load RMSE = {filt_rmse:.4f}")
-
-    objective_latex = mhe_objective.to_latex(underbrace=False, form="constrained")
-    print(objective_latex)
+    plt.show()
 
 if __name__ == "__main__":
     main()
