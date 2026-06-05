@@ -2,7 +2,8 @@
 
 The output is the full moving-horizon estimation problem: an ``argmin`` over the
 window variables, horizon summations of the weighted error terms, and an
-optional arrival-cost term. Set ``underbrace=True`` to label each term.
+arrival-cost term when an :class:`~openmhe.BaseArrivalCost` is supplied.
+Set ``underbrace=True`` to label each term.
 """
 
 from __future__ import annotations
@@ -142,11 +143,25 @@ def _sum_prefix(lo: str, hi: str, sym: LatexSymbols) -> str:
     return rf"\sum_{{{sym.index}={lo}}}^{{{hi}}} "
 
 
+def _render_arrival_term(
+    arrival_cost,
+    sym: LatexSymbols,
+    underbrace: bool,
+) -> str:
+    """Render the arrival-cost block for a configured strategy."""
+    lo, _ = _meas_window(sym)
+    residual, weight, description = arrival_cost.latex_parts(
+        state=sym.state, window_lo=lo
+    )
+    body = _weighted_norm(residual, weight, sym, squared=True)
+    desc = description if underbrace else None
+    return _wrap_underbrace(body, desc)
+
+
 def objective_to_latex(
     builder,
     *,
     underbrace: bool = False,
-    arrival: bool = True,
     multiline: bool | None = None,
     environment: str = "equation",
     standalone: bool = False,
@@ -159,11 +174,11 @@ def objective_to_latex(
     Parameters
     ----------
     builder : ObjectiveBuilder
-        Objective whose terms are rendered, in order.
+        Objective whose terms are rendered, in order. When
+        ``builder.arrival_cost`` is set, the corresponding arrival term is
+        included automatically.
     underbrace : bool
         Label each term with an ``\\underbrace{...}_{\\text{...}}`` description.
-    arrival : bool
-        Include a synthesized arrival-cost term (the builder does not store it).
     multiline : bool, optional
         Use an ``aligned`` block (one term per line). Defaults to ``underbrace``.
     environment : str
@@ -181,12 +196,13 @@ def objective_to_latex(
         defects listed under ``subject to``.
     """
     sym = symbols or LatexSymbols()
+    arrival_cost = getattr(builder, "arrival_cost", None)
     if form.lower() in ("constrained", "subject_to", "subject-to"):
         result = _constrained_latex(
             builder,
             sym=sym,
             underbrace=underbrace,
-            arrival=arrival,
+            arrival_cost=arrival_cost,
             environment=environment,
             define_penalties=define_penalties,
         )
@@ -199,12 +215,8 @@ def objective_to_latex(
 
     lines: list[str] = []
 
-    if arrival:
-        lo, _ = _meas_window(sym)
-        residual = f"{sym.state}_{{{lo}}} - {sym.arrival_ref}_{{{lo}}}"
-        body = _weighted_norm(residual, _inv(sym.arrival_cov), sym, squared=True)
-        desc = sym.descriptions["arrival"] if underbrace else None
-        lines.append(_wrap_underbrace(body, desc))
+    if arrival_cost is not None:
+        lines.append(_render_arrival_term(arrival_cost, sym, underbrace))
 
     has_process = any(_term_kind(t) == "PROCESS" for t in terms)
     has_input = any(
@@ -291,7 +303,7 @@ def _constrained_latex(
     *,
     sym: LatexSymbols,
     underbrace: bool,
-    arrival: bool,
+    arrival_cost,
     environment: str,
     define_penalties: bool,
 ) -> str:
@@ -318,15 +330,8 @@ def _constrained_latex(
     obj_parts: list[str] = []
     defect_constraints: list[str] = []
 
-    if arrival:
-        lo, _ = _meas_window(sym)
-        residual = f"{sym.state}_{{{lo}}} - {sym.arrival_ref}_{{{lo}}}"
-        body = _weighted_norm(residual, _inv(sym.arrival_cov), sym, squared=True)
-        obj_parts.append(
-            _wrap_underbrace(
-                body, sym.descriptions["arrival"] if underbrace else None
-            )
-        )
+    if arrival_cost is not None:
+        obj_parts.append(_render_arrival_term(arrival_cost, sym, underbrace))
 
     for term in terms:
         kind = _term_kind(term)

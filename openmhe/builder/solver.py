@@ -99,7 +99,22 @@ def build_mhe_solver(
 
     Each column of ``B`` must be assigned exactly once via regulated terms
     (RW/FD/SD), :class:`~openmhe.KnownInput`, or :class:`~openmhe.InputTrackingTerm`.
+
+    Arrival cost at the first stage of each window can be supplied either as a
+    fixed matrix ``P_arrival`` or via ``builder.arrival_cost``
+    (:class:`~openmhe.SteadyStateArrivalCost`, :class:`~openmhe.EKFArrivalCost`,
+    :class:`~openmhe.UKFArrivalCost`). Pass only one of ``P_arrival`` or
+    ``builder.arrival_cost``.
     """
+    arrival_cost = builder.arrival_cost
+    if P_arrival is not None and arrival_cost is not None:
+        raise ValueError("Pass only one of P_arrival or builder.arrival_cost.")
+    if arrival_cost is not None:
+        P_arrival = arrival_cost.initial_covariance(mhe_system, builder)
+        if arrival_cost.is_dynamic and needs_conl(builder):
+            raise ValueError(
+                "Dynamic arrival costs require LINEAR_LS (all L2 penalties)."
+            )
     validate_term_penalties(builder)
     ensure_acados_environment()
 
@@ -296,11 +311,11 @@ def build_mhe_solver(
 
     use_conl = needs_conl(builder)
     if use_conl:
-        arrival_slice, n_residual_0 = build_conl_cost(
+        arrival_slice, n_residual_0, W0_template = build_conl_cost(
             ocp, model, Vx, Vu, builder, n_residual, nx_base, P_arrival
         )
     else:
-        arrival_slice, n_residual_0 = build_linear_ls_cost(
+        arrival_slice, n_residual_0, W0_template = build_linear_ls_cost(
             ocp, Vx, Vu, builder, n_residual, nx, nx_base, P_arrival
         )
 
@@ -331,6 +346,11 @@ def build_mhe_solver(
     solver._known_inputs = known_inputs
     solver._pin_u_idx = pin_u_idx
     solver._cost_mode = mode
+    solver._arrival_cost = arrival_cost
+    solver._W0_template = W0_template
+    solver._arrival_W_slice = (
+        slice(n_residual, n_residual + nx_base) if arrival_slice is not None else None
+    )
     return solver
 
 
@@ -359,7 +379,16 @@ def run_solver(solver, y, u):
         builder, solver._rw_indices, solver._fd_indices, solver._sd_indices
     )
 
+    arrival_cost = getattr(solver, "_arrival_cost", None)
+    if arrival_cost is not None:
+        arrival_cost.reset()
+
     for idx, k in enumerate(range(N, n_steps)):
+        t_start = k - N
+        x_bar = x_prior[:nx_base]
+        if arrival_cost is not None:
+            x_bar, P_arr = arrival_cost.window_prior(t_start, y, u)
+
         u_seed = seed_reg_state_prior(
             x_prior,
             rw_col=load_state_col,
@@ -373,7 +402,7 @@ def run_solver(solver, y, u):
             window_idx=idx,
             unmeasured=unmeasured,
             u=u,
-            t_start=k - N,
+            t_start=t_start,
         )
         solver.set(0, "x", x_prior.copy())
 
@@ -401,8 +430,21 @@ def run_solver(solver, y, u):
             if j == 0 and solver._arrival_slice is not None:
                 yref0 = np.zeros(solver._n_residual_0)
                 yref0[: len(yref)] = yref
-                yref0[solver._arrival_slice] = x_prior[:nx_base]
+                if arrival_cost is not None:
+                    yref0[solver._arrival_slice] = x_bar
+                else:
+                    yref0[solver._arrival_slice] = x_prior[:nx_base]
                 solver.set(0, "yref", yref0)
+                if (
+                    arrival_cost is not None
+                    and arrival_cost.is_dynamic
+                    and solver._W0_template is not None
+                ):
+                    W0 = solver._W0_template.copy()
+                    W0[solver._arrival_W_slice, solver._arrival_W_slice] = np.linalg.inv(
+                        P_arr
+                    )
+                    solver.cost_set(0, "W", W0, api="new")
             else:
                 solver.set(j, "yref", yref)
 

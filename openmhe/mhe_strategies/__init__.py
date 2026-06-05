@@ -1,5 +1,13 @@
 """MHE objective terms, noise weights, penalties, and constraints."""
 
+from .arrival_cost import (
+    BaseArrivalCost,
+    EKFArrivalCost,
+    SteadyStateArrivalCost,
+    UKFArrivalCost,
+    noise_covs_from_builder,
+    steady_state_cov,
+)
 from .constraints import HardBounds
 from .penalties import (
     BasePenalty,
@@ -21,6 +29,12 @@ from .penalties import (
 )
 
 __all__ = [
+    "BaseArrivalCost",
+    "SteadyStateArrivalCost",
+    "EKFArrivalCost",
+    "UKFArrivalCost",
+    "noise_covs_from_builder",
+    "steady_state_cov",
     "BasePenalty",
     "HardBounds",
     "L1Penalty",

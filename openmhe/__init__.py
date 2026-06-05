@@ -19,8 +19,10 @@ __version__ = "0.1.0"
 
 from .frontend import AcadosConfig, SystemModel
 from .mhe_strategies import (
+    BaseArrivalCost,
     BasePenalty,
     DeadzonePenalty,
+    EKFArrivalCost,
     HardBounds,
     HuberPenalty,
     InputFirstDiffReg,
@@ -29,6 +31,9 @@ from .mhe_strategies import (
     InputSecondDiffReg,
     InputTrackingTerm,
     KnownInput,
+    SteadyStateArrivalCost,
+    UKFArrivalCost,
+    noise_covs_from_builder,
     weight_from_lambda_u,
     L1Penalty,
     L2Penalty,
@@ -36,6 +41,7 @@ from .mhe_strategies import (
     NoiseWeight,
     ObjectiveBuilder,
     ProcessTerm,
+    steady_state_cov,
 )
 from .builder import build_mhe_solver, run_solver
 from .export import LatexSymbols, objective_to_latex
@@ -48,6 +54,12 @@ __all__ = [
     "__version__",
     "SystemModel",
     "AcadosConfig",
+    "BaseArrivalCost",
+    "SteadyStateArrivalCost",
+    "EKFArrivalCost",
+    "UKFArrivalCost",
+    "noise_covs_from_builder",
+    "steady_state_cov",
     "BasePenalty",
     "build_mhe_solver",
     "run_solver",

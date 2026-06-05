@@ -56,11 +56,12 @@ ny, nx = model.ny, model.nx
 obj = mhe.ObjectiveBuilder()
 obj.add(mhe.MeasurementTerm(mhe.L2Penalty(), mhe.NoiseWeight(dim=ny, cov=0.01)))
 obj.add(mhe.ProcessTerm(mhe.L2Penalty(), mhe.NoiseWeight(dim=nx, cov=1e-4)))
-obj.add(mhe.KnownInput([0]))                      # motor: fixed from u in run_solver
-obj.add(mhe.InputRandomWalk([1], lambda_u=1.0))   # load: estimated
+    obj.add(mhe.KnownInput([0]))                      # motor: fixed from u in run_solver
+    obj.add(mhe.InputRandomWalk([1], lambda_u=1.0))   # load: estimated
+    obj.add(mhe.SteadyStateArrivalCost())
 
 solver = mhe.build_mhe_solver(
-    model.A, model.B, model.C, model.D,
+    model,
     N_horizon=50,
     builder=obj,
     dt=0.001,
@@ -69,6 +70,23 @@ solver = mhe.build_mhe_solver(
 
 u_hat, x_hat = mhe.run_solver(solver, y, u)
 ```
+
+### Arrival cost
+
+The stage-0 term `(x - x̄)ᵀ P⁻¹ (x - x̄)` ties each window to information outside the horizon. Attach a strategy with ``obj.add(...)``:
+
+```python
+obj.add(mhe.EKFArrivalCost(model, builder=obj))
+solver = mhe.build_mhe_solver(model, 50, obj, dt=0.001)
+```
+
+| Class | Behavior |
+|-------|----------|
+| `SteadyStateArrivalCost` | Fixed DARE covariance; `x̄ = 0` |
+| `EKFArrivalCost` | Discrete Kalman filter on base states; time-varying `P` and `x̄` |
+| `UKFArrivalCost` | Unscented filter (LTI-compatible; optional nonlinear `f`/`h`) |
+
+Alternatively pass a fixed matrix with `P_arrival=`. Dynamic arrival costs (`EKF`, `UKF`) require all-L2 penalties (`LINEAR_LS` mode). `run_solver` updates stage-0 weights each window when `P` changes.
 
 ### Input partition rule
 
@@ -168,16 +186,19 @@ Mixed L2 + robust terms use **CONVEX_OVER_NONLINEAR**. Solver JSON files are pre
 ## Export to LaTeX
 
 ```python
+obj.add(mhe.EKFArrivalCost(model, builder=obj))
 print(obj.to_latex(underbrace=True))
 print(obj.to_latex(form="constrained"))
 ```
+
+When an arrival cost has been added with ``obj.add(...)``, LaTeX export includes the
+matching term (steady-state, EKF, or UKF notation).
 
 `form="constrained"` writes the cost in terms of noise/defect variables (`v_k`, `w_k`, `δ_k`, `q^{(i)}_{u,k}`) and lists dynamics, measurement, and difference constraints under `subject to`.
 
 | Argument | Effect |
 |----------|--------|
 | `underbrace` | Label each term (default `False`) |
-| `arrival` | Include arrival-cost term (default `True`) |
 | `multiline` | `aligned` block, one term per line |
 | `environment` | Outer math environment (`"equation"`, `"align"`, or `""`) |
 | `standalone` | Wrap in a minimal compilable document |

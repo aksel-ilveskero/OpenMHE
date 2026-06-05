@@ -253,9 +253,23 @@ class ObjectiveBuilder:
     def __init__(self):
         """Start with an empty list of cost terms."""
         self.terms = []
+        self.arrival_cost = None
 
     def add(self, term):
-        """Append a measurement, process, input-tracking, or regularization term."""
+        """Append a cost term or arrival-cost strategy.
+
+        Pass a :class:`~openmhe.BaseArrivalCost` subclass
+        (:class:`~openmhe.SteadyStateArrivalCost`, :class:`~openmhe.EKFArrivalCost`,
+        :class:`~openmhe.UKFArrivalCost`) to attach the window arrival cost.
+        At most one arrival cost is allowed per objective.
+        """
+        from openmhe.mhe_strategies.arrival_cost import BaseArrivalCost
+
+        if isinstance(term, BaseArrivalCost):
+            if self.arrival_cost is not None:
+                raise ValueError("ObjectiveBuilder accepts at most one arrival cost.")
+            self.arrival_cost = term
+            return
         self.terms.append(term)
 
     def to_latex(self, **kwargs) -> str:
@@ -263,8 +277,9 @@ class ObjectiveBuilder:
 
         Accepts the same keyword arguments as
         :func:`openmhe.export.latex.objective_to_latex` (e.g. ``underbrace``,
-        ``arrival``, ``symbols``, and ``form="substituted"`` |
-        ``"constrained"`` for the ``minimize ... subject to`` layout).
+        ``symbols``, and ``form="substituted"`` | ``"constrained"`` for the
+        ``minimize ... subject to`` layout). When ``self.arrival_cost`` is set,
+        the matching arrival term is included automatically.
         """
         from openmhe.export.latex import objective_to_latex
 

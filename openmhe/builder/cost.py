@@ -76,8 +76,8 @@ def build_linear_ls_cost(
     nx: int,
     nx_base: int,
     P_arrival: np.ndarray | None,
-) -> tuple[slice | None, int]:
-    """Configure LINEAR_LS path and terminal cost. Returns arrival_slice, n_residual_0."""
+) -> tuple[slice | None, int, np.ndarray | None]:
+    """Configure LINEAR_LS path and terminal cost. Returns arrival_slice, n_residual_0, W_0."""
     ocp.cost.cost_type = "LINEAR_LS"
     ocp.cost.Vx = Vx
     ocp.cost.Vu = Vu
@@ -108,7 +108,8 @@ def build_linear_ls_cost(
         n_residual_0 = n_residual
 
     configure_negligible_terminal_cost(ocp, nx)
-    return arrival_slice, n_residual_0
+    W0 = np.array(ocp.cost.W_0, dtype=float).copy() if P_arrival is not None else None
+    return arrival_slice, n_residual_0, W0
 
 
 def build_conl_cost(
@@ -120,7 +121,7 @@ def build_conl_cost(
     n_residual: int,
     nx_base: int,
     P_arrival: np.ndarray | None,
-) -> tuple[slice | None, int]:
+) -> tuple[slice | None, int, np.ndarray | None]:
     """Configure CONVEX_OVER_NONLINEAR path and terminal cost."""
     y_expr = ca.DM(Vx) @ model.x + ca.DM(Vu) @ model.u
     model.cost_y_expr = y_expr
@@ -154,7 +155,10 @@ def build_conl_cost(
         n_residual_0 = n_residual
 
     configure_negligible_terminal_cost(ocp, model.x.shape[0])
-    return arrival_slice, n_residual_0
+    W0 = None
+    if P_arrival is not None and ocp.cost.cost_type_0 == "LINEAR_LS":
+        W0 = np.array(ocp.cost.W_0, dtype=float).copy()
+    return arrival_slice, n_residual_0, W0
 
 
 def configure_negligible_terminal_cost(ocp: AcadosOcp, nx: int) -> None:

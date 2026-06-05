@@ -1,5 +1,7 @@
 """Tests for ObjectiveBuilder.to_latex / objective_to_latex."""
 
+import numpy as np
+import pytest
 import openmhe as mhe
 from openmhe.export.latex import LatexSymbols
 
@@ -21,8 +23,56 @@ def test_contains_min_and_weight_symbols():
     assert "R^{-1}" in tex
     assert "Q^{-1}" in tex
     assert "U^{-1}" in tex
-    assert "P^{-1}" in tex
+    assert "P^{-1}" not in tex
     assert r"\lambda" in tex
+
+
+def test_steady_state_arrival_latex():
+    """Steady-state arrival cost renders when added to the objective."""
+    obj = _demo_objective()
+    obj.add(mhe.SteadyStateArrivalCost())
+    tex = obj.to_latex(underbrace=True)
+    assert r"x_{t-N}" in tex
+    assert "P^{-1}" in tex
+    assert r"\text{steady-state arrival cost}" in tex
+    assert r"\hat{x}" not in tex
+
+
+def test_ekf_arrival_latex():
+    """EKF arrival cost uses filter prior notation."""
+    obj = _demo_objective()
+    system = mhe.SystemModel.from_matrices(
+        np.array([[0.9]]),
+        np.array([[0.1, 0.05]]),
+        np.array([[1.0, 0.0]]),
+        None,
+        is_discrete=True,
+        dt=0.01,
+    )
+    arrival = mhe.EKFArrivalCost(system, Q=np.array([[0.001]]), R=np.array([[0.5]]))
+    obj.add(arrival)
+    tex = obj.to_latex(underbrace=True)
+    assert r"x_{t-N} - \hat{x}_{t-N|t-N-1}" in tex
+    assert r"P_{t-N|t-N-1}^{-1}" in tex
+    assert r"\text{EKF arrival cost}" in tex
+
+
+def test_ukf_arrival_latex():
+    """UKF arrival cost is labeled distinctly from EKF."""
+    obj = _demo_objective()
+    system = mhe.SystemModel.from_matrices(
+        np.array([[0.9]]),
+        np.array([[0.1, 0.05]]),
+        np.array([[1.0, 0.0]]),
+        None,
+        is_discrete=True,
+        dt=0.01,
+    )
+    arrival = mhe.UKFArrivalCost(system, Q=np.array([[0.001]]), R=np.array([[0.5]]))
+    obj.add(arrival)
+    tex = obj.to_latex(underbrace=True)
+    assert r"\text{UKF arrival cost}" in tex
+    assert r"P_{t-N|t-N-1}^{-1}" in tex
 
 
 def test_measurement_residual_rendered():
@@ -34,27 +84,29 @@ def test_measurement_residual_rendered():
 def test_underbrace_toggle():
     """``underbrace=True`` adds labeled term descriptions."""
     obj = _demo_objective()
+    obj.add(mhe.SteadyStateArrivalCost())
     with_ub = obj.to_latex(underbrace=True)
     without_ub = obj.to_latex(underbrace=False)
     assert r"\underbrace" in with_ub
     assert r"\text{measurement error}" in with_ub
     assert r"\text{process noise}" in with_ub
-    assert r"\text{arrival cost}" in with_ub
+    assert r"\text{steady-state arrival cost}" in with_ub
     assert r"\underbrace" not in without_ub
 
 
 def test_multiline_defaults_to_underbrace():
     """Multiline ``aligned`` layout follows ``underbrace``."""
     obj = _demo_objective()
+    obj.add(mhe.SteadyStateArrivalCost())
     assert r"\begin{aligned}" in obj.to_latex(underbrace=True)
     assert r"\begin{aligned}" not in obj.to_latex(underbrace=False)
 
 
-def test_arrival_toggle():
-    """``arrival=False`` omits the ``P^{-1}`` term."""
+def test_no_arrival_without_cost():
+    """Arrival term is omitted when no arrival cost was added."""
     obj = _demo_objective()
-    assert "P^{-1}" in obj.to_latex(arrival=True)
-    assert "P^{-1}" not in obj.to_latex(arrival=False)
+    assert "P^{-1}" not in obj.to_latex()
+    assert "P^{-1}" not in obj.to_latex(form="constrained")
 
 
 def test_input_tracking_reference_variants():
@@ -157,12 +209,22 @@ def test_constrained_input_error_no_double_subscript():
     assert "q_u^{(0)}_{k}" not in tex
 
 
-def test_constrained_alias_and_arrival_toggle():
-    """``form='subject_to'`` aliases constrained; arrival can be toggled."""
+def test_constrained_alias_and_arrival():
+    """``form='subject_to'`` aliases constrained; arrival follows ``obj.add(...)``."""
     obj = _constrained_objective()
+    obj.add(mhe.SteadyStateArrivalCost())
     assert obj.to_latex(form="subject_to") == obj.to_latex(form="constrained")
-    assert "P^{-1}" in obj.to_latex(form="constrained", arrival=True)
-    assert "P^{-1}" not in obj.to_latex(form="constrained", arrival=False)
+    assert "P^{-1}" in obj.to_latex(form="constrained")
+    obj.arrival_cost = None
+    assert "P^{-1}" not in obj.to_latex(form="constrained")
+
+
+def test_duplicate_arrival_cost_raises():
+    """Only one arrival cost may be added."""
+    obj = _demo_objective()
+    obj.add(mhe.SteadyStateArrivalCost())
+    with pytest.raises(ValueError, match="at most one arrival cost"):
+        obj.add(mhe.SteadyStateArrivalCost())
 
 
 def test_constrained_random_walk_defect():

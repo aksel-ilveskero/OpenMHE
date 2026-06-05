@@ -3,8 +3,6 @@
 import time
 
 import numpy as np
-import scipy.linalg as sla
-import scipy.signal as signal
 import matplotlib.pyplot as plt
 
 from test_bench import TestBench
@@ -30,20 +28,6 @@ def simulate(test_bench: TestBench, dt: float, t_end: float):
     x, y = test_bench.simulate(dt, u, w_cov, v_cov)
 
     return t, x, y, u
-
-
-def steady_state_arrival_cov(A, B, C, D, dt, Q, R):
-    """Discrete algebraic Riccati matrix for steady-state arrival cost."""
-    A_d, B_d, C_d, D_d, _ = signal.cont2discrete((A, B, C, D), dt=dt)
-    return sla.solve_discrete_are(A_d.T, C_d.T, Q, R)
-
-
-def lowpass_filtfilt(x: np.ndarray, dt: float, cutoff_hz: float = 15.0, order: int = 4) -> np.ndarray:
-    """Zero-phase low-pass (quick noise cleanup on load torque)."""
-    fs = 1.0 / dt
-    wn = min(cutoff_hz / (0.5 * fs), 0.99)
-    b, a = signal.butter(order, wn, btype="low")
-    return signal.filtfilt(b, a, np.asarray(x, dtype=float))
 
 
 def main():
@@ -85,6 +69,7 @@ def main():
     )
 
     mhe_objective.add(mhe.KnownInput([0]))
+    mhe_objective.add(mhe.UKFArrivalCost(mhe_system, builder=mhe_objective))
 
     print("Compiling ACADOS solver...")
     solver = mhe.build_mhe_solver(
