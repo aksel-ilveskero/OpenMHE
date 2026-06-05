@@ -151,7 +151,7 @@ def main():
         dt=dt,
     )
 
-    n_window = 50
+    n_window = 15
     ny, nx, nu = mhe_system.ny, mhe_system.nx, mhe_system.nu
 
     mhe_objective = mhe.ObjectiveBuilder()
