@@ -110,6 +110,41 @@ Typical shaft line: `KnownInput([0])` or strong `InputTrackingTerm` on motor; `I
 u[:, N - 1 : N - 1 + u_hat.shape[1]]
 ```
 
+### Window post-steps
+
+Inject arbitrary post-processing after each window solve via `post_steps=`:
+
+```python
+u_hat, x_hat = mhe.run_solver(solver, y, u, post_steps=[my_observer])
+```
+
+Each callable receives a `mhe.WindowStep` context and may overwrite
+`ctx.u_hat[:, ctx.idx]` or `ctx.x_hat[:, ctx.idx]` in place.
+The raw MHE output is always used for regulator-state seeding of the next
+window, so post-step corrections appear only in the returned arrays and are
+never fed back into the solver.
+
+**`WindowStep` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `idx` | `int` | Column index into `x_hat` / `u_hat` for this window |
+| `t_start` | `int` | Time index of the first stage (`k - N`) |
+| `k` | `int` | Time index one past the last stage |
+| `N` | `int` | Horizon length |
+| `dt` | `float` | Sample period (seconds) |
+| `nx_base` | `int` | Number of plant states (excludes augmented inputs) |
+| `nu` | `int` | Total number of physical inputs |
+| `x_hat` | `ndarray` | Full `(nx_base, n_est)` state array — **mutable** |
+| `u_hat` | `ndarray` | Full `(nu, n_est)` input array — **mutable** |
+| `x_full` | `ndarray` | Augmented state at the last horizon stage |
+| `y` | `ndarray` | Raw measurement sequence `(ny, n_steps)` |
+| `u` | `ndarray` | Raw known-input sequence `(nu, n_steps)` |
+
+If a step object exposes a `reset()` method it is called once before the
+window loop starts. Steps are skipped on failed solves (the column stays
+`NaN`).
+
 ## Run the demo
 
 From the repository root:

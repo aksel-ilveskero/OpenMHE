@@ -1,6 +1,7 @@
 """Build and run Acados sliding-window MHE solvers from :class:`~openmhe.ObjectiveBuilder`."""
 
 import os
+from dataclasses import dataclass
 
 import casadi as ca
 import numpy as np
@@ -78,6 +79,52 @@ def _build_yref_stack(builder, y_meas, u_known, nx_base, nu, nw):
         else:
             raise ValueError(f"Unsupported term type: {kind}")
     return np.concatenate(parts)
+
+
+@dataclass
+class WindowStep:
+    """Context passed to each post-step callable after a window solve.
+
+    Fields
+    ------
+    idx : int
+        Column index into ``x_hat`` / ``u_hat`` for the current window.
+    t_start : int
+        Time index of the first stage in this window (``k - N``).
+    k : int
+        Time index one past the last stage (``k - 1`` is the last stage).
+    N : int
+        Horizon length.
+    dt : float
+        Sample period in seconds.
+    nx_base : int
+        Number of plant state variables (excludes augmented input states).
+    nu : int
+        Total number of physical inputs.
+    x_hat : np.ndarray
+        Full ``(nx_base, n_est)`` state estimate array, **mutable in place**.
+    u_hat : np.ndarray
+        Full ``(nu, n_est)`` input estimate array, **mutable in place**.
+    x_full : np.ndarray
+        Augmented state vector at the last horizon stage (length ``nx``).
+    y : np.ndarray
+        Raw measurement sequence ``(ny, n_steps)``.
+    u : np.ndarray
+        Raw known-input sequence ``(nu, n_steps)``.
+    """
+
+    idx: int
+    t_start: int
+    k: int
+    N: int
+    dt: float
+    nx_base: int
+    nu: int
+    x_hat: np.ndarray
+    u_hat: np.ndarray
+    x_full: np.ndarray
+    y: np.ndarray
+    u: np.ndarray
 
 
 def build_mhe_solver(
@@ -351,16 +398,30 @@ def build_mhe_solver(
     solver._arrival_W_slice = (
         slice(n_residual, n_residual + nx_base) if arrival_slice is not None else None
     )
+    solver._dt = dt
     return solver
 
 
-def run_solver(solver, y, u):
+def run_solver(solver, y, u, post_steps=None):
     """Run sliding-window MHE over a measurement sequence.
 
     Each window covers time indices ``[k - N, …, k - 1]``. Returned
     ``u_hat[:, idx]`` and ``x_hat[:, idx]`` are the solution at the last
     stage of that window (time ``k - 1``), not ``k``. Align ground truth as
     ``u[:, N - 1 : N - 1 + n_est]`` (and the same for ``x``).
+
+    Parameters
+    ----------
+    post_steps : list, optional
+        Callables invoked once per window **after** the estimates for that
+        window are written to ``u_hat`` / ``x_hat``. Each callable receives a
+        :class:`WindowStep` context and may modify ``ctx.u_hat[:, ctx.idx]``
+        or ``ctx.x_hat[:, ctx.idx]`` in place. The raw MHE output is always
+        used for regulator-state seeding of the next window, so post-step
+        corrections affect only the returned arrays and are never fed back into
+        the solver. Steps are skipped on failed solves (the corresponding
+        column stays ``NaN``). If a step exposes a ``reset()`` method it is
+        called once before the loop starts.
     """
     n_steps = y.shape[1] if y.ndim > 1 else len(y)
     nu = solver._nu
@@ -374,6 +435,9 @@ def run_solver(solver, y, u):
     n_est = n_steps - N
     u_hat = np.full((nu, n_est), np.nan)
     x_hat = np.full((nx_base, n_est), np.nan)
+    # Keeps raw MHE output for regulator-state seeding so that post-step
+    # corrections to u_hat are never fed back into the solver.
+    _u_hat_raw = np.full((nu, n_est), np.nan)
     x_prior = np.zeros(solver._nx)
     unmeasured = unmeasured_regulator_indices(
         builder, solver._rw_indices, solver._fd_indices, solver._sd_indices
@@ -382,6 +446,11 @@ def run_solver(solver, y, u):
     arrival_cost = getattr(solver, "_arrival_cost", None)
     if arrival_cost is not None:
         arrival_cost.reset()
+
+    _post_steps = list(post_steps) if post_steps is not None else []
+    for step in _post_steps:
+        if callable(getattr(step, "reset", None)):
+            step.reset()
 
     for idx, k in enumerate(range(N, n_steps)):
         t_start = k - N
@@ -398,7 +467,7 @@ def run_solver(solver, y, u):
             rw_indices=solver._rw_indices,
             fd_indices=solver._fd_indices,
             sd_indices=solver._sd_indices,
-            u_hat=u_hat,
+            u_hat=_u_hat_raw,
             window_idx=idx,
             unmeasured=unmeasured,
             u=u,
@@ -464,6 +533,26 @@ def run_solver(solver, y, u):
         for ui, col in solver._col_fd1.items():
             if ui not in controlled_idx and ui not in load_state_col:
                 u_hat[ui, idx] = x_end[col]
+
+        _u_hat_raw[:, idx] = u_hat[:, idx]
+
+        if _post_steps:
+            ctx = WindowStep(
+                idx=idx,
+                t_start=t_start,
+                k=k,
+                N=N,
+                dt=solver._dt,
+                nx_base=nx_base,
+                nu=nu,
+                x_hat=x_hat,
+                u_hat=u_hat,
+                x_full=x_end,
+                y=y,
+                u=u,
+            )
+            for step in _post_steps:
+                step(ctx)
 
         if solver._arrival_slice is not None:
             x_prior = np.array(solver.get(1, "x")).ravel()
