@@ -337,8 +337,7 @@ if __name__ == "__main__":
                 mhe.InputSecondDiffReg(target_idx=[0], lambda_u=LOAD_LAMBDA)
             )
 
-
-        mhe_objective.add(mhe.UKFArrivalCost(mhe_system, builder=mhe_objective))
+        mhe_objective.add(mhe.EKFArrivalCost(mhe_system, builder=mhe_objective))
 
         print("Compiling ACADOS solver...")
         solver = mhe.build_mhe_solver(

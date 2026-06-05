@@ -81,6 +81,38 @@ def _build_yref_stack(builder, y_meas, u_known, nx_base, nu, nw):
     return np.concatenate(parts)
 
 
+def _precompute_yrefs(builder, y, u, nx_base, nu, nw, n_steps):
+    """Build the stacked ``yref`` vector for every time index once."""
+    y_2d = y if y.ndim > 1 else y.reshape(1, -1)
+    u_2d = u if u.ndim > 1 else u.reshape(1, -1)
+    first = _build_yref_stack(builder, y_2d[:, 0], u_2d[:, 0], nx_base, nu, nw)
+    yrefs = np.empty((n_steps, first.size))
+    yrefs[0] = first
+    for t_idx in range(1, n_steps):
+        yrefs[t_idx] = _build_yref_stack(
+            builder, y_2d[:, t_idx], u_2d[:, t_idx], nx_base, nu, nw
+        )
+    return yrefs
+
+
+def _configure_nlp_solver(
+    ocp: AcadosOcp,
+    *,
+    nlp_solver_type: str,
+    nlp_solver_max_iter: int | None,
+) -> None:
+    """Apply NLP/QP options tuned for warm-started sliding-window MHE."""
+    ocp.solver_options.nlp_solver_type = nlp_solver_type
+    if nlp_solver_max_iter is None:
+        nlp_solver_max_iter = 1 if nlp_solver_type == "SQP_RTI" else 50
+    ocp.solver_options.nlp_solver_max_iter = nlp_solver_max_iter
+    ocp.solver_options.qp_solver_warm_start = True
+    ocp.solver_options.nlp_solver_warm_start_first_qp_from_nlp = True
+    ocp.solver_options.nlp_solver_tol_stat = 1e-4
+    ocp.solver_options.nlp_solver_tol_eq = 1e-4
+    ocp.solver_options.nlp_solver_tol_ineq = 1e-4
+
+
 @dataclass
 class WindowStep:
     """Context passed to each post-step callable after a window solve.
@@ -135,6 +167,8 @@ def build_mhe_solver(
     P_arrival: np.ndarray | None = None,
     already_discrete: bool = False,
     input_as_state: list[int] | None = None,
+    nlp_solver_type: str = "SQP_RTI",
+    nlp_solver_max_iter: int | None = None,
 ):
     """Build an Acados MHE solver from an objective.
 
@@ -343,10 +377,13 @@ def build_mhe_solver(
     ocp.solver_options.N_horizon = N_horizon
     ocp.solver_options.tf = N_horizon * dt
     ocp.solver_options.integrator_type = "DISCRETE"
-    ocp.solver_options.nlp_solver_type = "SQP"
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
-    ocp.solver_options.nlp_solver_max_iter = 100
+    _configure_nlp_solver(
+        ocp,
+        nlp_solver_type=nlp_solver_type,
+        nlp_solver_max_iter=nlp_solver_max_iter,
+    )
 
     pin_u_idx: list[int] = []
     if known_inputs:
@@ -369,7 +406,7 @@ def build_mhe_solver(
     mode = cost_mode_tag(builder)
     n_known = len(known_inputs)
     json_name = (
-        f"mhe_{mode}_nr{n_residual}_nx{nx}_nu{nu}"
+        f"mhe_{mode}_{nlp_solver_type.lower()}_nr{n_residual}_nx{nx}_nu{nu}"
         f"_nrw{n_rw}_nfd{n_fd}_nsd{n_sd}_nk{n_known}_N{N_horizon}.json"
     )
     solver = AcadosOcpSolver(ocp, json_file=mhe_json_path(json_name))
@@ -390,6 +427,7 @@ def build_mhe_solver(
     solver._col_sd1 = col_sd1
     solver._col_sd2 = col_sd2
     solver._controlled_idx = controlled_idx
+    solver._controlled_map = {ui: i for i, ui in enumerate(controlled_idx)}
     solver._known_inputs = known_inputs
     solver._pin_u_idx = pin_u_idx
     solver._cost_mode = mode
@@ -433,15 +471,30 @@ def run_solver(solver, y, u, post_steps=None):
     nw = solver._nw
 
     n_est = n_steps - N
+    if n_est <= 0:
+        raise ValueError(
+            f"Measurement sequence has {n_steps} samples but horizon is N={N}; "
+            "need at least N+1 samples."
+        )
+
     u_hat = np.full((nu, n_est), np.nan)
     x_hat = np.full((nx_base, n_est), np.nan)
     # Keeps raw MHE output for regulator-state seeding so that post-step
     # corrections to u_hat are never fed back into the solver.
     _u_hat_raw = np.full((nu, n_est), np.nan)
     x_prior = np.zeros(solver._nx)
+    controlled_map = getattr(solver, "_controlled_map", None)
+    if controlled_map is None:
+        controlled_map = {ui: i for i, ui in enumerate(controlled_idx)}
     unmeasured = unmeasured_regulator_indices(
         builder, solver._rw_indices, solver._fd_indices, solver._sd_indices
     )
+
+    yrefs = _precompute_yrefs(builder, y, u, nx_base, nu, nw, n_steps)
+    pin_vals_all = None
+    if solver._pin_u_idx and u is not None:
+        known_inputs = np.asarray(solver._known_inputs, dtype=int)
+        pin_vals_all = u[known_inputs, :].T
 
     arrival_cost = getattr(solver, "_arrival_cost", None)
     if arrival_cost is not None:
@@ -452,9 +505,23 @@ def run_solver(solver, y, u, post_steps=None):
         if callable(getattr(step, "reset", None)):
             step.reset()
 
+    has_arrival = solver._arrival_slice is not None
+    yref0 = np.zeros(solver._n_residual_0) if has_arrival else None
+    arrival_slice = solver._arrival_slice
+    n_residual_0 = solver._n_residual_0
+    W0_template = solver._W0_template
+    arrival_W_slice = solver._arrival_W_slice
+    pin_u_idx = solver._pin_u_idx
+    dynamic_arrival = (
+        arrival_cost is not None
+        and arrival_cost.is_dynamic
+        and W0_template is not None
+    )
+
     for idx, k in enumerate(range(N, n_steps)):
         t_start = k - N
         x_bar = x_prior[:nx_base]
+        P_arr = None
         if arrival_cost is not None:
             x_bar, P_arr = arrival_cost.window_prior(t_start, y, u)
 
@@ -473,46 +540,35 @@ def run_solver(solver, y, u, post_steps=None):
             u=u,
             t_start=t_start,
         )
-        solver.set(0, "x", x_prior.copy())
+        solver.set(0, "x", x_prior)
 
         if idx > 0 and u_seed:
             u_guess = np.array(solver.get(0, "u")).ravel()
             for ui, val in u_seed.items():
-                if ui in unmeasured and ui in controlled_idx:
-                    u_guess[controlled_idx.index(ui)] = val
+                ci = controlled_map.get(ui)
+                if ci is not None and ui in unmeasured:
+                    u_guess[ci] = val
             solver.set(0, "u", u_guess)
 
         for j in range(N):
             t_idx = k - N + j
-            y_meas = y[:, t_idx] if y.ndim > 1 else y[t_idx]
-            yref = _build_yref_stack(
-                builder, y_meas, u[:, t_idx], nx_base, nu, nw
-            )
+            yref = yrefs[t_idx]
 
-            if solver._pin_u_idx and u is not None:
-                pin_vals = np.array(
-                    [float(u[ui, t_idx]) for ui in solver._known_inputs]
-                )
+            if pin_u_idx and pin_vals_all is not None:
+                pin_vals = pin_vals_all[t_idx]
                 solver.set(j, "lbu", pin_vals)
                 solver.set(j, "ubu", pin_vals)
 
-            if j == 0 and solver._arrival_slice is not None:
-                yref0 = np.zeros(solver._n_residual_0)
-                yref0[: len(yref)] = yref
+            if j == 0 and has_arrival:
+                yref0[: yref.size] = yref
                 if arrival_cost is not None:
-                    yref0[solver._arrival_slice] = x_bar
+                    yref0[arrival_slice] = x_bar
                 else:
-                    yref0[solver._arrival_slice] = x_prior[:nx_base]
+                    yref0[arrival_slice] = x_prior[:nx_base]
                 solver.set(0, "yref", yref0)
-                if (
-                    arrival_cost is not None
-                    and arrival_cost.is_dynamic
-                    and solver._W0_template is not None
-                ):
-                    W0 = solver._W0_template.copy()
-                    W0[solver._arrival_W_slice, solver._arrival_W_slice] = np.linalg.inv(
-                        P_arr
-                    )
+                if dynamic_arrival:
+                    W0 = W0_template.copy()
+                    W0[arrival_W_slice, arrival_W_slice] = np.linalg.inv(P_arr)
                     solver.cost_set(0, "W", W0, api="new")
             else:
                 solver.set(j, "yref", yref)
@@ -524,14 +580,14 @@ def run_solver(solver, y, u, post_steps=None):
         u_full = np.array(solver.get(N - 1, "u")).ravel()
         x_hat[:, idx] = x_end[:nx_base]
         for ui in controlled_idx:
-            u_hat[ui, idx] = u_full[controlled_idx.index(ui)]
+            u_hat[ui, idx] = u_full[controlled_map[ui]]
         for ui, col in load_state_col.items():
             u_hat[ui, idx] = x_end[col]
         for ui, col in solver._col_sd1.items():
-            if ui not in controlled_idx:
+            if ui not in controlled_map:
                 u_hat[ui, idx] = x_end[col]
         for ui, col in solver._col_fd1.items():
-            if ui not in controlled_idx and ui not in load_state_col:
+            if ui not in controlled_map and ui not in load_state_col:
                 u_hat[ui, idx] = x_end[col]
 
         _u_hat_raw[:, idx] = u_hat[:, idx]
@@ -554,7 +610,7 @@ def run_solver(solver, y, u, post_steps=None):
             for step in _post_steps:
                 step(ctx)
 
-        if solver._arrival_slice is not None:
+        if has_arrival:
             x_prior = np.array(solver.get(1, "x")).ravel()
         else:
             x_prior = np.array(solver.get(0, "x")).ravel()
