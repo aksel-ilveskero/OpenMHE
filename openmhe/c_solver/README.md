@@ -11,7 +11,13 @@ Builds `libopenmhe_mhe_run.so` with `-O3 -march=native -ffast-math` (override vi
 make -C openmhe/c_solver CODEGEN_DIR=/path/to/c_generated_code ACADOS_DIR=/path/to/acados
 ```
 
-Rebuild after every codegen change (stack buffers in `run_loop.c` use `OPENMHE_MHE_*` from the generated header). `run_c_solver` rebuilds automatically when `acados_solver_openmhe_mhe.h` is newer than `run_loop.o`; if you still see a dimension mismatch error, run `make -C openmhe/c_solver clean all`.
+Rebuild after every codegen change (stack buffers in `run_loop.c` use `OPENMHE_MHE_*` from the generated header). `run_c_solver` rebuilds automatically when `acados_solver_openmhe_mhe.h` is newer than `run_loop.o`, or when called with `rebuild=True`.
+
+If you see a **dimension mismatch** (`status -3` / stale `libopenmhe_mhe_run.so`):
+
+1. Re-run `build_mhe_solver` with the new horizon or model.
+2. Call `run_c_solver(..., rebuild=True)` or `make -C openmhe/c_solver clean all`.
+3. In Jupyter, **restart the kernel** after changing problem size — Python may keep an old `.so` mapped in memory until the process exits.
 
 ## Profiling
 
@@ -39,4 +45,10 @@ All shooting stages share the same `nx` and `nu` (standard for our MHE models), 
 
 ## Python entry point
 
-`openmhe.run_c_solver(solver, y, u)` builds the library if needed and runs the C sliding-window loop. Dynamic arrival (`EKFArrivalCost`, etc.) is precomputed in Python (`x_bar`, `W0` per window); the C driver only applies `yref` / `W` updates and Acados solves. Use `run_solver()` for UKF arrival until in-C support is restored.
+`openmhe.run_c_solver(solver, y, u, post_steps=...)` builds the library if needed and runs the C sliding-window loop. Signature and return values match `run_solver` (`u_hat`, `x_hat` with shape `(nu, n_est)` and `(nx_base, n_est)`).
+
+Dynamic arrival (`EKFArrivalCost`, etc.) is precomputed in Python (`x_bar`, `W0` per window); the C driver applies stage-0 `yref` / `W` and runs Acados solves. Stage cost weights `W` are fixed at codegen time — change `lambda_u` or noise covariances, then call `build_mhe_solver` again.
+
+Use `run_solver()` for `UKFArrivalCost` until in-C UKF support is restored.
+
+Optional: `post_steps` run in Python after the C loop (same `WindowStep` semantics as `run_solver`).

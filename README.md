@@ -7,7 +7,7 @@ Moving horizon estimation (MHE) on [Acados](https://docs.acados.org/) with compo
 - **Composable objectives** — stack `MeasurementTerm`, `ProcessTerm`, `KnownInput`, `InputTrackingTerm`, and regulators in an `ObjectiveBuilder`
 - **Robust penalties** — L2 (fast `LINEAR_LS`), L1, Huber, and dead-zone ( `CONVEX_OVER_NONLINEAR` )
 - **Unknown inputs** — model loads or biases as random-walk augmented states (`InputRandomWalk`)
-- **Sliding windows** — `run_solver` with optional arrival cost and regulator state seeding from prior windows
+- **Sliding windows** — `run_solver` (Python) or `run_c_solver` (compiled C loop) with optional arrival cost and regulator state seeding
 - **LaTeX export** — paper-ready objective in substituted or constrained (`minimize … subject to`) form
 
 ## Requirements
@@ -56,9 +56,9 @@ ny, nx = model.ny, model.nx
 obj = mhe.ObjectiveBuilder()
 obj.add(mhe.MeasurementTerm(mhe.L2Penalty(), mhe.NoiseWeight(dim=ny, cov=0.01)))
 obj.add(mhe.ProcessTerm(mhe.L2Penalty(), mhe.NoiseWeight(dim=nx, cov=1e-4)))
-    obj.add(mhe.KnownInput([0]))                      # motor: fixed from u in run_solver
-    obj.add(mhe.InputRandomWalk([1], lambda_u=1.0))   # load: estimated
-    obj.add(mhe.SteadyStateArrivalCost())
+obj.add(mhe.KnownInput([0]))                      # motor: fixed from u in run_solver
+obj.add(mhe.InputRandomWalk([1], lambda_u=1.0))   # load: estimated
+obj.add(mhe.SteadyStateArrivalCost())
 
 solver = mhe.build_mhe_solver(
     model,
@@ -70,6 +70,18 @@ solver = mhe.build_mhe_solver(
 
 u_hat, x_hat = mhe.run_solver(solver, y, u)
 ```
+
+`y` and `u` must be `(channels, samples)`. Transpose simulation arrays if they are stored as `(samples, channels)`.
+
+### C solver (`run_c_solver`)
+
+For production-style sliding windows, use the compiled driver in `openmhe/c_solver/`:
+
+```python
+u_hat, x_hat = mhe.run_c_solver(solver, y, u, post_steps=[...], rebuild=False)
+```
+
+Same outputs as `run_solver`. EKF arrival is precomputed in Python; the C loop applies Acados solves. Rebuild after horizon or dimension changes (`rebuild=True` or `make -C openmhe/c_solver clean all`). See [openmhe/c_solver/README.md](openmhe/c_solver/README.md).
 
 ### Arrival cost
 
@@ -145,16 +157,15 @@ If a step object exposes a `reset()` method it is called once before the
 window loop starts. Steps are skipped on failed solves (the column stays
 `NaN`).
 
-## Run the demo
+## Examples
 
-From the repository root:
+| Example | Command |
+|---------|---------|
+| Four-disk shaft (intro) | `python examples/opentorsion_4_disk/ot_4_disk.py` |
+| 22-disk test bench | `python examples/opentorsion_22_disk/ot_22_disk.py` |
+| ICE tutorial (notebook) | `examples/opentorsion_ic_engine/ice_estimation.ipynb` |
 
-```bash
-pip install -e ".[opentorsion,demo]"
-python examples/opentorsion_demo/opentorsion_demo.py
-```
-
-Writes `mhe_results.png` and `load_torque_filtfilt.png` in the current directory. See [examples/opentorsion_demo/README.md](examples/opentorsion_demo/README.md).
+Install extras and set `ACADOS_SOURCE_DIR` first. Overview: [examples/README.md](examples/README.md).
 
 ## Tests
 
@@ -172,7 +183,8 @@ pytest tests/ -q
 | `openmhe/builder/` | Acados OCP assembly and sliding-window driver |
 | `openmhe/export/` | LaTeX rendering |
 | `openmhe/frontend/` | `SystemModel`, Acados runtime helpers |
-| `examples/opentorsion_demo/` | OpenTorsion shaft-line MHE demo |
+| `openmhe/c_solver/` | Compiled sliding-window driver (`run_c_solver`) |
+| `examples/` | OpenTorsion shaft-line and ICE tutorials |
 | `tests/` | Partition validation and LaTeX export tests |
 
 ### Generated artifacts
@@ -202,8 +214,9 @@ Add `mhe_json/`, `c_generated_code/`, and local `*.png` to `.gitignore` before p
 | `KnownInput` | Known input fixed from `u` in `run_solver` (no cost row) |
 | `InputTrackingTerm` | Soft tracking (`reference="measured"`, `"zero"`, or scalar) |
 | `InputRandomWalk` | Unknown input as extra state; inferred from `y` and model |
-| `InputFirstDiffReg` | Penalize `u_k - u_{k-1}` (`lambda_u` = inverse penalty strength) |
+| `InputFirstDiffReg` | Penalize `u_k - u_{k-1}` (`lambda_u` on regulator residual) |
 | `InputSecondDiffReg` | Penalize `u_k - 2 u_{k-1} + u_{k-2}` on controlled inputs |
+| `InputRandomWalk` | Unknown input as augmented state; `lambda_u` weights increment noise `w_u` in `ProcessTerm` |
 | `InputRegTerm` | Deprecated; use `InputFirstDiffReg` / `InputSecondDiffReg` |
 | `input_as_state` kwarg | Legacy random-walk indices (prefer `InputRandomWalk`) |
 
