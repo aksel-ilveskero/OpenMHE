@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,10 @@ from openmhe.paths import get_codegen_dir
 
 _C_SOLVER_DIR = Path(__file__).resolve().parent.parent / "c_solver"
 _RUN_LIB = _C_SOLVER_DIR / "libopenmhe_mhe_run.so"
+
+_RUN_LIB_HANDLE: ctypes.CDLL | None = None
+_OCP_LIB_HANDLE: ctypes.CDLL | None = None
+_LOADED_HEADER_MTIME: float | None = None
 
 
 class _RunConfig(ctypes.Structure):
@@ -64,8 +69,9 @@ def _build_run_lib(*, force: bool = False) -> Path:
     ):
         return _RUN_LIB
 
-    if stale_obj:
+    if force or stale_obj:
         run_obj.unlink(missing_ok=True)
+        _RUN_LIB.unlink(missing_ok=True)
 
     ensure_acados_environment()
     env = os.environ.copy()
@@ -79,14 +85,61 @@ def _build_run_lib(*, force: bool = False) -> Path:
     return _RUN_LIB
 
 
+def _unload_shared_lib(lib: ctypes.CDLL | None) -> None:
+    """Drop a ctypes-loaded shared library so a rebuilt ``.so`` can be mapped."""
+    if lib is None:
+        return
+    handle = getattr(lib, "_handle", None)
+    if not handle:
+        return
+    if sys.platform == "linux":
+        try:
+            libdl = ctypes.CDLL("libdl.so.2")
+        except OSError:
+            libdl = ctypes.CDLL("libdl.so")
+        libdl.dlclose.argtypes = [ctypes.c_void_p]
+        libdl.dlclose.restype = ctypes.c_int
+        libdl.dlclose(ctypes.c_void_p(handle))
+    elif sys.platform == "darwin":
+        libc = ctypes.CDLL("libc.dylib")
+        libc.dlclose.argtypes = [ctypes.c_void_p]
+        libc.dlclose.restype = ctypes.c_int
+        libc.dlclose(ctypes.c_void_p(handle))
+
+
 def _load_run_lib(*, rebuild: bool = False) -> ctypes.CDLL:
+    """Load (or reload) the C sliding-window driver and Acados OCP library."""
+    global _RUN_LIB_HANDLE, _OCP_LIB_HANDLE, _LOADED_HEADER_MTIME
+
     ensure_acados_environment()
-    lib_path = _build_run_lib(force=rebuild)
     codegen = get_codegen_dir()
+    header = codegen / "acados_solver_openmhe_mhe.h"
+    header_mtime = header.stat().st_mtime if header.is_file() else 0.0
+
+    lib_path = _build_run_lib(force=rebuild)
+
+    need_reload = (
+        rebuild
+        or _RUN_LIB_HANDLE is None
+        or _LOADED_HEADER_MTIME is None
+        or header_mtime > _LOADED_HEADER_MTIME
+    )
+    if need_reload and _RUN_LIB_HANDLE is not None:
+        _unload_shared_lib(_RUN_LIB_HANDLE)
+        _unload_shared_lib(_OCP_LIB_HANDLE)
+        _RUN_LIB_HANDLE = None
+        _OCP_LIB_HANDLE = None
+        _LOADED_HEADER_MTIME = None
+
     ocp_lib = codegen / "libacados_ocp_solver_openmhe_mhe.so"
-    if ocp_lib.is_file():
-        ctypes.CDLL(str(ocp_lib), mode=ctypes.RTLD_GLOBAL)
-    return ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
+    if _OCP_LIB_HANDLE is None and ocp_lib.is_file():
+        _OCP_LIB_HANDLE = ctypes.CDLL(str(ocp_lib), mode=ctypes.RTLD_GLOBAL)
+
+    if _RUN_LIB_HANDLE is None:
+        _RUN_LIB_HANDLE = ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
+        _LOADED_HEADER_MTIME = header_mtime
+
+    return _RUN_LIB_HANDLE
 
 
 def _u_extract_specs(solver) -> np.ndarray:
@@ -314,10 +367,11 @@ def run_c_solver(solver, y, u, post_steps=None, *, rebuild: bool = False):
 
     if status == -3:
         raise RuntimeError(
-            "C MHE driver was built for different problem dimensions than the "
-            "current Acados codegen (stale libopenmhe_mhe_run.so). Rebuild with "
-            "run_c_solver(..., rebuild=True) or: "
-            "make -C openmhe/c_solver clean all"
+            "C MHE driver dimensions do not match the current Acados codegen "
+            f"(solver N={N}, nx={solver._nx}, nu_ocp={nu_ocp}, ny0={cfg.ny0}). "
+            "After changing horizon or objective terms, call "
+            "run_c_solver(..., rebuild=True). If the error persists in Jupyter, "
+            "restart the kernel (ctypes cannot reload a stale in-memory .so)."
         )
     if status != 0:
         raise RuntimeError(f"C MHE driver failed with status {status}")
