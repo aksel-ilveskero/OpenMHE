@@ -251,7 +251,7 @@ def load_feather(plot: bool = False, N: int = 1) -> np.ndarray:
     return time, np.column_stack((e1, e2, t1, t2)), u_m, u_p
 
 if __name__ == "__main__":
-    sim_t, measurement_data, motor, propeller = load_feather(plot=False, N=3)
+    sim_t, measurement_data, motor, propeller = load_feather(plot=False, N=2)
     dt = np.mean(np.diff(sim_t))
 
     # Rearrange measurement data to be in the same order as the model
@@ -358,7 +358,7 @@ if __name__ == "__main__":
             mhe_objective,
             dt=dt,
             already_discrete=True,
-            qp_solver="PARTIAL_CONDENSING_HPIPM"
+            qp_solver="PARTIAL_CONDENSING_HPIPM",
         )
 
         print("Running MHE (C solver, -O3 -march=native -ffast-math)...")
