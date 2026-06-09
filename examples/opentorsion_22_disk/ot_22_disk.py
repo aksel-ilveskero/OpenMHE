@@ -180,7 +180,10 @@ class TestBench:
 
 
 
-def load_feather(plot: bool = False) -> np.ndarray:
+def load_feather(plot: bool = False, N: int = 1) -> np.ndarray:
+    if N < 1:
+        raise ValueError("N must be >= 1")
+
     measurements = pd.read_feather('examples/opentorsion_22_disk/data/testbench_evaluation_dataset.feather')
  
     # Group by sample_id
@@ -215,6 +218,15 @@ def load_feather(plot: bool = False) -> np.ndarray:
         u_m = sample_slice["u_m"].to_numpy()[cutoff:]
         #u_m = u_m_full[cutoff:]
 
+        if N != 1:
+            time = time[::N]
+            e1 = e1[::N]
+            e2 = e2[::N]
+            t1 = t1[::N]
+            t2 = t2[::N]
+            u_p = u_p[::N]
+            u_m = u_m[::N]
+
         # print(group["sample_id"].unique)
         # Append as a tuple (or list) into our master list
 
@@ -239,7 +251,7 @@ def load_feather(plot: bool = False) -> np.ndarray:
     return time, np.column_stack((e1, e2, t1, t2)), u_m, u_p
 
 if __name__ == "__main__":
-    sim_t, measurement_data, motor, propeller = load_feather(plot=False)
+    sim_t, measurement_data, motor, propeller = load_feather(plot=False, N=3)
     dt = np.mean(np.diff(sim_t))
 
     # Rearrange measurement data to be in the same order as the model
@@ -283,7 +295,7 @@ if __name__ == "__main__":
 
     W_COV = 0.01
     V_COV = 0.5
-    LOAD_LAMBDA = 10
+    LOAD_LAMBDA = 0.1
 
     for sensor_config in sensor_configs:
         measured_states = [state_index_connection[sensor] for sensor in sensor_config]
@@ -346,13 +358,11 @@ if __name__ == "__main__":
             mhe_objective,
             dt=dt,
             already_discrete=True,
+            qp_solver="PARTIAL_CONDENSING_HPIPM"
         )
 
         print("Running MHE (C solver, -O3 -march=native -ffast-math)...")
-        t_mhe_start = time.perf_counter()
         u_hat, x_hat = mhe.run_c_solver(solver, y, u)
-        t_mhe_elapsed = time.perf_counter() - t_mhe_start
-        print(f"MHE solver time (C): {t_mhe_elapsed:.3f} s")
 
         # run_solver returns estimates at the last stage of each window (index k-1).
         n_est = x_hat.shape[1]

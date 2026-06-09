@@ -8,6 +8,10 @@ OPT_CFLAGS ?= -O3 -march=native -ffast-math
 INCLUDE_PATH = $(ACADOS_DIR)/include
 LIB_PATH = $(ACADOS_DIR)/lib
 
+# Match the BLASFEO target used to build libblasfeo in ACADOS_DIR (override via env).
+BLASFEO_TARGET_H := $(INCLUDE_PATH)/blasfeo/include/blasfeo_target.h
+BLASFEO_TARGET_DEFINE ?= $(shell awk '/^#define TARGET_(X64|X86|ARM|GENERIC)/ {print $$2; exit}' $(BLASFEO_TARGET_H) 2>/dev/null)
+
 CPPFLAGS += -I$(CODEGEN_DIR)
 CPPFLAGS += -I$(INCLUDE_PATH)
 CPPFLAGS += -I$(INCLUDE_PATH)/acados
@@ -15,6 +19,9 @@ CPPFLAGS += -I$(INCLUDE_PATH)/blasfeo/include
 CPPFLAGS += -I$(INCLUDE_PATH)/hpipm/include
 
 CFLAGS = -fPIC -std=c99 -Wall -Wextra $(OPT_CFLAGS)
+ifneq ($(BLASFEO_TARGET_DEFINE),)
+CFLAGS += -D$(BLASFEO_TARGET_DEFINE)
+endif
 
 ifdef OPENMHE_PROFILE
 CFLAGS += -DOPENMHE_PROFILE

@@ -9,6 +9,7 @@ extern "C" {
 
 #define OPENMHE_MAX_U_EXTRACT 16
 #define OPENMHE_MAX_PIN 8
+#define OPENMHE_MAX_NU_PHY 16
 
 /** One row of ``u_hat`` filled from the NLP solution at a stage. */
 typedef struct {
@@ -39,8 +40,16 @@ typedef struct {
     int n_unmeasured;
 } openmhe_run_config_t;
 
+/** Allocate and set up the Acados NLP solver inside ``capsule``. */
+int openmhe_mhe_init_solver(openmhe_mhe_solver_capsule *capsule);
+
+/** Tear down the Acados NLP solver; safe if init was not called or failed. */
+int openmhe_mhe_free_solver(openmhe_mhe_solver_capsule *capsule);
+
 /**
  * Sliding-window MHE driver (C counterpart of ``run_solver``).
+ *
+ * Requires a prior successful call to ``openmhe_mhe_init_solver``.
  *
  * ``yrefs``: ``(n_steps, ny_stage)`` row-major; the driver advances a pointer
  * by ``ny_stage`` each window (no per-window copy of the full table).

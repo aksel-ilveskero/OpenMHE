@@ -13,6 +13,25 @@
 
 #define ISNAN(x) ((x) != (x))
 
+int openmhe_mhe_init_solver(openmhe_mhe_solver_capsule *capsule)
+{
+    if (capsule == NULL) {
+        return -1;
+    }
+    return openmhe_mhe_acados_create(capsule);
+}
+
+int openmhe_mhe_free_solver(openmhe_mhe_solver_capsule *capsule)
+{
+    if (capsule == NULL) {
+        return 0;
+    }
+    if (openmhe_mhe_acados_get_nlp_solver(capsule) == NULL) {
+        return 0;
+    }
+    return openmhe_mhe_acados_free(capsule);
+}
+
 static void set_yref_stage(
     ocp_nlp_config *config,
     ocp_nlp_dims *dims,
@@ -66,8 +85,8 @@ static void set_u(
 }
 
 /**
- * Shift x[1..N] -> x[0..N-1] and u[1..N-1] -> u[0..N-2] via one dense memmove
- * per field (ocp_nlp_{get,set}_all layout), not per-stage API calls.
+ * Shift x[1..N] -> x[0..N-1], u[1..N-1] -> u[0..N-2], and pi[1..N-1] -> pi[0..N-2]
+ * via one dense memmove per field (ocp_nlp_{get,set}_all layout).
  *
  * OpenMHE keeps the same nx and nu at every shooting stage, so the get_all
  * packing is evenly strided and a single memmove per field is correct.
@@ -82,6 +101,7 @@ static void warm_start_shift_bulk(
 {
     double x_traj[(N_HORIZON + 1) * NX];
     double u_traj[N_HORIZON * NU_OCP];
+    double pi_traj[N_HORIZON * NX];
 
     ocp_nlp_get_all(solver, in, out, "x", x_traj);
     memmove(x_traj, x_traj + nx, (size_t)N * (size_t)nx * sizeof(double));
@@ -93,6 +113,10 @@ static void warm_start_shift_bulk(
     ocp_nlp_get_all(solver, in, out, "u", u_traj);
     memmove(u_traj, u_traj + nu, (size_t)(N - 1) * (size_t)nu * sizeof(double));
     ocp_nlp_set_all(solver, in, out, "u", u_traj);
+
+    ocp_nlp_get_all(solver, in, out, "pi", pi_traj);
+    memmove(pi_traj, pi_traj + nx, (size_t)(N - 1) * (size_t)nx * sizeof(double));
+    ocp_nlp_set_all(solver, in, out, "pi", pi_traj);
 }
 
 static int pin_changed(
@@ -129,16 +153,6 @@ static void set_pin_if_changed(
     *pin_cached = 1;
 }
 
-static int ui_is_unmeasured(int ui, const int *unmeasured_ui, int n_unmeasured)
-{
-    for (int j = 0; j < n_unmeasured; ++j) {
-        if (unmeasured_ui[j] == ui) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static double u_value_at_lag(
     int ui,
     int lag,
@@ -147,8 +161,7 @@ static double u_value_at_lag(
     int nu,
     const double *u_hat,
     const double *u_meas,
-    const int *unmeasured_ui,
-    int n_unmeasured)
+    const int *is_unmeasured)
 {
     if (window_idx >= lag) {
         double v = u_hat[(size_t)(window_idx - lag) * (size_t)nu + (size_t)ui];
@@ -159,8 +172,7 @@ static double u_value_at_lag(
     if (window_idx == 0 && u_meas != NULL && t_start - lag >= 0) {
         return u_meas[(size_t)(t_start - lag) * (size_t)nu + (size_t)ui];
     }
-    if (!ui_is_unmeasured(ui, unmeasured_ui, n_unmeasured) && u_meas != NULL
-        && t_start - lag >= 0) {
+    if (!is_unmeasured[ui] && u_meas != NULL && t_start - lag >= 0) {
         return u_meas[(size_t)(t_start - lag) * (size_t)nu + (size_t)ui];
     }
     return 0.0;
@@ -181,31 +193,26 @@ static void seed_reg_state_prior(
     const int *sd_idx,
     const int *sd1_col,
     const int *sd2_col,
-    const int *unmeasured_ui,
-    int n_unmeasured,
+    const int *is_unmeasured,
     const double *u_hat,
     const double *u_meas)
 {
     for (int i = 0; i < n_rw; ++i) {
         int ui = rw_idx[i];
         x_prior[rw_col[i]] = u_value_at_lag(
-            ui, 1, window_idx, t_start, nu, u_hat, u_meas, unmeasured_ui,
-            n_unmeasured);
+            ui, 1, window_idx, t_start, nu, u_hat, u_meas, is_unmeasured);
     }
     for (int i = 0; i < n_fd; ++i) {
         int ui = fd_idx[i];
         x_prior[fd_col[i]] = u_value_at_lag(
-            ui, 1, window_idx, t_start, nu, u_hat, u_meas, unmeasured_ui,
-            n_unmeasured);
+            ui, 1, window_idx, t_start, nu, u_hat, u_meas, is_unmeasured);
     }
     for (int i = 0; i < n_sd; ++i) {
         int ui = sd_idx[i];
         x_prior[sd1_col[i]] = u_value_at_lag(
-            ui, 1, window_idx, t_start, nu, u_hat, u_meas, unmeasured_ui,
-            n_unmeasured);
+            ui, 1, window_idx, t_start, nu, u_hat, u_meas, is_unmeasured);
         x_prior[sd2_col[i]] = u_value_at_lag(
-            ui, 2, window_idx, t_start, nu, u_hat, u_meas, unmeasured_ui,
-            n_unmeasured);
+            ui, 2, window_idx, t_start, nu, u_hat, u_meas, is_unmeasured);
     }
 }
 
@@ -284,10 +291,8 @@ int openmhe_mhe_run_sliding(
         || N != N_HORIZON || n_pin > OPENMHE_MAX_PIN) {
         return -3;
     }
-
-    int status = openmhe_mhe_acados_create(capsule);
-    if (status != 0) {
-        return status;
+    if (openmhe_mhe_acados_get_nlp_solver(capsule) == NULL) {
+        return -4;
     }
 
     ocp_nlp_config *nlp_config = openmhe_mhe_acados_get_nlp_config(capsule);
@@ -306,6 +311,15 @@ int openmhe_mhe_run_sliding(
         u_specs[i].src_idx = u_extract_raw[3 * i + 2];
     }
 
+    if (nu > OPENMHE_MAX_NU_PHY) {
+        return -2;
+    }
+    int is_unmeasured[OPENMHE_MAX_NU_PHY];
+    memset(is_unmeasured, 0, sizeof(is_unmeasured));
+    for (int j = 0; j < cfg->n_unmeasured; ++j) {
+        is_unmeasured[unmeasured_ui[j]] = 1;
+    }
+
     double x_prior[NX];
     double x_end[NX];
     double u_full[NU_OCP];
@@ -322,6 +336,8 @@ int openmhe_mhe_run_sliding(
     openmhe_profile_t prof = {0};
     OPENMHE_PROF_DECL;
 
+    int status = 0;
+
     for (int idx = 0; idx < n_est; ++idx) {
         const int t_start = idx;
         const double *x_bar_win = NULL;
@@ -333,8 +349,8 @@ int openmhe_mhe_run_sliding(
 
         seed_reg_state_prior(
             x_prior, idx, t_start, nu, cfg->n_rw, rw_idx, rw_col, cfg->n_fd,
-            fd_idx, fd_col, cfg->n_sd, sd_idx, sd1_col, sd2_col, unmeasured_ui,
-            cfg->n_unmeasured, u_hat_raw, u_meas);
+            fd_idx, fd_col, cfg->n_sd, sd_idx, sd1_col, sd2_col, is_unmeasured,
+            u_hat_raw, u_meas);
 
         set_x(nlp_config, nlp_dims, nlp_out, nlp_in, 0, x_prior);
 
@@ -342,10 +358,10 @@ int openmhe_mhe_run_sliding(
             get_u(nlp_config, nlp_dims, nlp_out, 0, u_full);
             for (int c = 0; c < nu_ctrl; ++c) {
                 int ui = controlled_idx[c];
-                if (ui_is_unmeasured(ui, unmeasured_ui, cfg->n_unmeasured)) {
+                if (is_unmeasured[ui]) {
                     u_full[c] = u_value_at_lag(
                         ui, 1, idx, t_start, nu, u_hat_raw, u_meas,
-                        unmeasured_ui, cfg->n_unmeasured);
+                        is_unmeasured);
                 }
             }
             set_u(nlp_config, nlp_dims, nlp_out, nlp_in, 0, u_full);

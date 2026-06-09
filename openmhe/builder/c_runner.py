@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import time
 import os
 import subprocess
 import sys
@@ -12,7 +13,11 @@ import numpy as np
 
 from openmhe.builder.input_regs import unmeasured_regulator_indices
 from openmhe.builder.solver import WindowStep, _precompute_yrefs
-from openmhe.frontend.acados_runtime import acados_root, ensure_acados_environment
+from openmhe.frontend.acados_runtime import (
+    acados_root,
+    blasfeo_target_define,
+    ensure_acados_environment,
+)
 from openmhe.paths import get_codegen_dir
 
 _C_SOLVER_DIR = Path(__file__).resolve().parent.parent / "c_solver"
@@ -77,6 +82,7 @@ def _build_run_lib(*, force: bool = False) -> Path:
     env = os.environ.copy()
     env["CODEGEN_DIR"] = str(codegen)
     env["ACADOS_DIR"] = acados_root()
+    env["BLASFEO_TARGET_DEFINE"] = blasfeo_target_define()
     subprocess.run(
         ["make", "-C", str(_C_SOLVER_DIR), f"CODEGEN_DIR={codegen}"],
         check=True,
@@ -211,6 +217,10 @@ def run_c_solver(solver, y, u, post_steps=None, *, rebuild: bool = False):
     lib = _load_run_lib(rebuild=rebuild)
     lib.openmhe_mhe_acados_create_capsule.restype = ctypes.c_void_p
     lib.openmhe_mhe_acados_free_capsule.argtypes = [ctypes.c_void_p]
+    lib.openmhe_mhe_init_solver.argtypes = [ctypes.c_void_p]
+    lib.openmhe_mhe_init_solver.restype = ctypes.c_int
+    lib.openmhe_mhe_free_solver.argtypes = [ctypes.c_void_p]
+    lib.openmhe_mhe_free_solver.restype = ctypes.c_int
     _c_double_p = ctypes.POINTER(ctypes.c_double)
     _c_int_p = ctypes.POINTER(ctypes.c_int)
     lib.openmhe_mhe_run_sliding.argtypes = [
@@ -335,7 +345,14 @@ def run_c_solver(solver, y, u, post_steps=None, *, rebuild: bool = False):
         return np.ascontiguousarray(arr, dtype=np.int32)
 
     capsule = lib.openmhe_mhe_acados_create_capsule()
+    status = -1
     try:
+        t_mhe_start = time.perf_counter()
+        status = lib.openmhe_mhe_init_solver(capsule)
+        if status != 0:
+            raise RuntimeError(
+                f"Acados solver init failed with status {status}"
+            )
         status = lib.openmhe_mhe_run_sliding(
             capsule,
             ctypes.byref(cfg),
@@ -362,9 +379,16 @@ def run_c_solver(solver, y, u, post_steps=None, *, rebuild: bool = False):
             _f64(x_hat_rm).ctypes.data_as(_c_double_p),
             _f64(u_raw_rm).ctypes.data_as(_c_double_p),
         )
+        t_mhe_end = time.perf_counter()
+        print(f"MHE time: {t_mhe_end - t_mhe_start:.6f} seconds")
     finally:
+        lib.openmhe_mhe_free_solver(capsule)
         lib.openmhe_mhe_acados_free_capsule(capsule)
 
+    if status == -4:
+        raise RuntimeError(
+            "C MHE driver called before Acados solver init (internal error)."
+        )
     if status == -3:
         raise RuntimeError(
             "C MHE driver dimensions do not match the current Acados codegen "

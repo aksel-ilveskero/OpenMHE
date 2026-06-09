@@ -79,6 +79,7 @@ def build_linear_ls_cost(
 ) -> tuple[slice | None, int, np.ndarray | None]:
     """Configure LINEAR_LS path and terminal cost. Returns arrival_slice, n_residual_0, W_0."""
     ocp.cost.cost_type = "LINEAR_LS"
+    ocp.cost.cost_type_e = "LINEAR_LS"
     ocp.cost.Vx = Vx
     ocp.cost.Vu = Vu
     ocp.cost.W = stack_weights(builder)

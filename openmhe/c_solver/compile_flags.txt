@@ -3,6 +3,7 @@
 -I/home/aksel/Code/acados/include/acados
 -I/home/aksel/Code/acados/include/blasfeo/include
 -I/home/aksel/Code/acados/include/hpipm/include
+-DTARGET_X64_INTEL_HASWELL
 -O3
 -march=native
 -ffast-math

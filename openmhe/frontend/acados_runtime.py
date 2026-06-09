@@ -2,7 +2,9 @@
 
 import ctypes
 import os
+import re
 import sys
+from pathlib import Path
 
 def _guess_acados_root() -> str:
     """Resolve Acados source tree without printing template warnings."""
@@ -18,6 +20,36 @@ def acados_root() -> str:
     if env:
         return os.path.realpath(os.path.expanduser(env))
     return _guess_acados_root()
+
+
+_BLASFEO_TARGET_RE = re.compile(
+    r"^#define (TARGET_(?:X64|X86|ARM|GENERIC)[A-Z0-9_]*)"
+)
+
+
+def blasfeo_target_define(acados_dir: str | None = None) -> str:
+    """Return the BLASFEO ``TARGET_*`` macro matching the installed Acados build.
+
+    Reads ``include/blasfeo/include/blasfeo_target.h``. Falls back to
+    ``TARGET_<BLASFEO_TARGET>`` from the environment, then ``TARGET_GENERIC``.
+    """
+    override = os.environ.get("BLASFEO_TARGET_DEFINE")
+    if override:
+        return override
+
+    root = Path(acados_dir or acados_root())
+    header = root / "include" / "blasfeo" / "include" / "blasfeo_target.h"
+    if header.is_file():
+        for line in header.read_text().splitlines():
+            match = _BLASFEO_TARGET_RE.match(line.strip())
+            if match:
+                return match.group(1)
+
+    env_tgt = os.environ.get("BLASFEO_TARGET")
+    if env_tgt:
+        return f"TARGET_{env_tgt}"
+
+    return "TARGET_GENERIC"
 
 
 def ensure_acados_environment() -> str:

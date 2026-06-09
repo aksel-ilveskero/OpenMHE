@@ -100,14 +100,23 @@ def _configure_nlp_solver(
     *,
     nlp_solver_type: str,
     nlp_solver_max_iter: int | None,
+    qp_solver: str,
+    N_horizon: int,
 ) -> None:
     """Apply NLP/QP options tuned for warm-started sliding-window MHE."""
     ocp.solver_options.nlp_solver_type = nlp_solver_type
     if nlp_solver_max_iter is None:
         nlp_solver_max_iter = 1 if nlp_solver_type == "SQP_RTI" else 50
     ocp.solver_options.nlp_solver_max_iter = nlp_solver_max_iter
-    ocp.solver_options.qp_solver_warm_start = True
-    ocp.solver_options.nlp_solver_warm_start_first_qp_from_nlp = True
+    ocp.solver_options.qp_solver = qp_solver
+    if qp_solver == "PARTIAL_CONDENSING_HPIPM":
+        ocp.solver_options.hpipm_mode = "SPEED_ABS"
+        ocp.solver_options.qp_solver_cond_N = N_horizon
+        ocp.solver_options.qp_solver_warm_start = 1
+        ocp.solver_options.nlp_solver_warm_start_first_qp = True
+    else:
+        ocp.solver_options.qp_solver_warm_start = 1
+        ocp.solver_options.nlp_solver_warm_start_first_qp_from_nlp = False
     ocp.solver_options.nlp_solver_tol_stat = 1e-4
     ocp.solver_options.nlp_solver_tol_eq = 1e-4
     ocp.solver_options.nlp_solver_tol_ineq = 1e-4
@@ -169,6 +178,7 @@ def build_mhe_solver(
     input_as_state: list[int] | None = None,
     nlp_solver_type: str = "SQP_RTI",
     nlp_solver_max_iter: int | None = None,
+    qp_solver: str = "PARTIAL_CONDENSING_HPIPM",
 ):
     """Build an Acados MHE solver from an objective.
 
@@ -377,13 +387,13 @@ def build_mhe_solver(
     ocp.solver_options.N_horizon = N_horizon
     ocp.solver_options.tf = N_horizon * dt
     ocp.solver_options.integrator_type = "DISCRETE"
-    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
-    ocp.solver_options.hpipm_mode = 'SPEED_ABS'
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     _configure_nlp_solver(
         ocp,
         nlp_solver_type=nlp_solver_type,
         nlp_solver_max_iter=nlp_solver_max_iter,
+        qp_solver=qp_solver,
+        N_horizon=N_horizon,
     )
 
     pin_u_idx: list[int] = []

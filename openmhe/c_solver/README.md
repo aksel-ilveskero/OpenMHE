@@ -1,6 +1,6 @@
 # C sliding-window MHE driver
 
-Builds `libopenmhe_mhe_run.so` with `-O3 -march=native -ffast-math` (override via `OPT_CFLAGS`).
+Builds `libopenmhe_mhe_run.so` with `-O3 -march=native -ffast-math` (override via `OPT_CFLAGS`). The Makefile auto-detects the BLASFEO target from `$(ACADOS_DIR)/include/blasfeo/include/blasfeo_target.h` and passes `-D$(BLASFEO_TARGET_DEFINE)` so compile-time struct layouts match `libblasfeo` (override with `BLASFEO_TARGET_DEFINE=TARGET_...`).
 
 ## Prerequisites
 
@@ -45,7 +45,7 @@ All shooting stages share the same `nx` and `nu` (standard for our MHE models), 
 
 ## Python entry point
 
-`openmhe.run_c_solver(solver, y, u, post_steps=...)` builds the library if needed and runs the C sliding-window loop. Signature and return values match `run_solver` (`u_hat`, `x_hat` with shape `(nu, n_est)` and `(nx_base, n_est)`).
+`openmhe.run_c_solver(solver, y, u, post_steps=...)` builds the library if needed and runs the C sliding-window loop. Each call allocates an Acados capsule, runs `openmhe_mhe_init_solver` → `openmhe_mhe_run_sliding` → `openmhe_mhe_free_solver`. Signature and return values match `run_solver` (`u_hat`, `x_hat` with shape `(nu, n_est)` and `(nx_base, n_est)`).
 
 Dynamic arrival (`EKFArrivalCost`, etc.) is precomputed in Python (`x_bar`, `W0` per window); the C driver applies stage-0 `yref` / `W` and runs Acados solves. Stage cost weights `W` are fixed at codegen time — change `lambda_u` or noise covariances, then call `build_mhe_solver` again.
 
