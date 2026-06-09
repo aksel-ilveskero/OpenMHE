@@ -29,6 +29,7 @@ typedef struct {
     int nu_ctrl;
     int ny_stage;
     int ny0;
+    int n_arrival; /* plant arrival residual rows (<= nx_base) */
     int has_arrival;
     int arrival_off;
     int dynamic_arrival;
@@ -38,7 +39,9 @@ typedef struct {
     int n_fd;
     int n_sd;
     int n_unmeasured;
+    /** Enable LTI vector-only solves after window 0 (see ``lti_fast.h``). */
     int lti_linear_ls_fast;
+    /** 1 when the problem was built with all-L2 ``LINEAR_LS`` penalties. */
     int linear_ls;
 } openmhe_run_config_t;
 
@@ -77,6 +80,7 @@ int openmhe_mhe_run_sliding(
     const int *sd1_col,
     const int *sd2_col,
     const int *unmeasured_ui,
+    const int *arrival_state_idx,
     const double *u_meas,
     double *u_hat,
     double *x_hat,

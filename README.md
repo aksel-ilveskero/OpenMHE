@@ -8,6 +8,7 @@ Moving horizon estimation (MHE) on [Acados](https://docs.acados.org/) with compo
 - **Robust penalties** — L2 (fast `LINEAR_LS`), L1, Huber, and dead-zone ( `CONVEX_OVER_NONLINEAR` )
 - **Unknown inputs** — model loads or biases as random-walk augmented states (`InputRandomWalk`)
 - **Sliding windows** — `run_solver` (Python) or `run_c_solver` (compiled C loop) with optional arrival cost and regulator state seeding
+- **LTI fast solve** — for all-L2 linear problems, `run_c_solver` reuses condensed QP factors after the first window (~25% faster RTI on shaft-line demos; requires `SQP_RTI`)
 - **LaTeX export** — paper-ready objective in substituted or constrained (`minimize … subject to`) form
 
 ## Requirements
@@ -78,10 +79,29 @@ u_hat, x_hat = mhe.run_solver(solver, y, u)
 For production-style sliding windows, use the compiled driver in `openmhe/c_solver/`:
 
 ```python
-u_hat, x_hat = mhe.run_c_solver(solver, y, u, post_steps=[...], rebuild=False)
+solver = mhe.build_mhe_solver(
+    model, N_horizon, builder, dt=dt,
+    nlp_solver_type="SQP_RTI",   # required for the fast path below
+)
+u_hat, x_hat = mhe.run_c_solver(
+    solver, y, u,
+    lti_linear_ls_fast=True,     # default for all-L2 builds; disable to benchmark
+    rebuild=False,
+)
 ```
 
-Same outputs as `run_solver`. EKF arrival is precomputed in Python; the C loop applies Acados solves. Rebuild after horizon or dimension changes (`rebuild=True` or `make -C openmhe/c_solver clean all`). See [openmhe/c_solver/README.md](openmhe/c_solver/README.md).
+Same outputs as `run_solver`. EKF arrival is precomputed in Python; the C loop applies Acados solves. Rebuild after horizon or dimension changes (`rebuild=True` or `make -C openmhe/c_solver clean all`).
+
+**LTI fast path** (default when every term uses `L2Penalty`):
+
+| Window | What happens |
+|--------|----------------|
+| 0 | Full SQP-RTI solve; condensed QP left-hand side is factorised |
+| 1… | Vector-only update + QP solve with reused factors |
+
+Requires `nlp_solver_type='SQP_RTI'`. With `SQP` or robust (`CONL`) penalties, OpenMHE warns and uses a full solve every window. Dynamic `EKFArrivalCost` refreshes the stage-0 Hessian each window but still skips Hessians on later stages.
+
+Details, profiling, and C source map: [openmhe/c_solver/README.md](openmhe/c_solver/README.md).
 
 ### Arrival cost
 
@@ -183,7 +203,7 @@ pytest tests/ -q
 | `openmhe/builder/` | Acados OCP assembly and sliding-window driver |
 | `openmhe/export/` | LaTeX rendering |
 | `openmhe/frontend/` | `SystemModel`, Acados runtime helpers |
-| `openmhe/c_solver/` | Compiled sliding-window driver (`run_c_solver`) |
+| `openmhe/c_solver/` | Compiled sliding-window driver (`run_c_solver`, LTI fast path in `lti_fast.c`) |
 | `examples/` | OpenTorsion shaft-line and ICE tutorials |
 | `tests/` | Partition validation and LaTeX export tests |
 

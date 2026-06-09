@@ -27,13 +27,27 @@
     - Rebuild when acados header dimensions change (no stale NX)
     - post_steps hook (e.g. PI observer in ot_4_disk)
 - filter_arrival.c: EKF/UKF + Cholesky utilities (unit tests only)
+- LTI + LINEAR_LS fast path (lti_fast.c)
+    - Window 0: full SQP-RTI + condense_qp_lhs
+    - Windows 1+: vector-only QP update + precondensed_lhs solve (~25% solve time on ot_22)
+    - Requires SQP_RTI; warn and fall back to full solve otherwise
+    - Dynamic EKF arrival: stage-0 Hessian refresh, LHS invalidated per window
+    - KnownInput pins via update_qp_matrices (not vectors-only)
+    - tests/test_lti_fast.py regression suite
+- Codegen export: openmhe_mhe_extra.{h,c} (A, B, Vx, Vu, W) for tooling / future RHS assembly
+- QP defaults tuned for sliding windows
+    - hpipm_mode=SPEED_ABS
+    - qp_solver_cond_N=N_horizon (avoid extra condensing overhead)
+- Profiling: OPENMHE_PROFILE=1 (setup/solve/shift + Acados lin/qp/reg/glob per-window)
+- ot_22_disk: load_feather(..., N=) measurement subsampling
+- Fast-path + C driver docs (openmhe/c_solver/README.md, root README)
 
 # TODO
 - Input regulating term
     - Custom input format
 
 - Secondary PI loop for unknown inputs
-    - PILoadObserver + post_steps in ot_4_disk (done); generalize / document?
+    - PILoadObserver + post_steps in ot_4_disk (done); generalize / document in package API?
 
 - Hard constraints for physically impossible solutions
 - Soft constraints for infeasable solutions
@@ -44,14 +58,17 @@
     - Optional: in-C incremental EKF (currently wrong at ot_22 scale; Python precompute is the path)
 
 - Real-time performance (target: solve + overhead < dt, ~1 ms on ot_22)
-    - Bottleneck is Acados SQP-RTI solve (~1.8 ms/window), not C loop setup/shift
-    - Exploit LTI + LINEAR_LS structure: reused KKT / Riccati instead of full condensing each window
+    - Baseline (N=3 subsample): ~1.8 ms/window full RTI, ~1.34 ms/window fast path
+    - Phase 2 fast path: standalone QP RHS from openmhe_mhe_extra (skip Acados lin submodules)
     - Smaller QP if acceptable: fewer augmented regulator states, horizon tuning
-    - Minor: hpipm_mode=SPEED_ABS, qp_solver_cond_N experiments (~5–10% seen)
+    - Further qp_solver / condensing experiments if needed after Phase 2
 
 - Parameter estimation
 - Support for multi-rate sensors
 
-- C driver polish (low priority; microsecond-scale)
+- C driver / test polish (low priority)
     - In-place warm-start via blasfeo_dveccp on nlp_out->ux (uniform nx/nu assumed)
-    - OPENMHE_PROFILE builds for setup/solve/shift breakdown
+    - Test isolation: test_c_runner_parity fails when run after test_lti_fast in same process (Acados shared-lib dimension pollution)
+
+- Numerics (optional)
+    - Per-state diagonal scaling for stiff OpenTorsion minimal realizations (float32 ruled out for 22-disk model)

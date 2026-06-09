@@ -16,6 +16,46 @@ def _term_kind(term) -> str:
     return getattr(term, "target_type", getattr(term, "type", ""))
 
 
+def invert_arrival_covariance(
+    P: np.ndarray,
+    *,
+    tol: float = 1e-8,
+    max_weight: float = 1e6,
+) -> np.ndarray:
+    """Arrival weight ``P^{-1}`` with null-space directions zeroed and capped.
+
+    Tiny or zero eigenvalues (strict kinematics / unobservable directions) receive
+    no arrival penalty.  Large weights are clipped to keep the QP well scaled.
+    """
+    P = np.asarray(P, dtype=float)
+    if P.ndim == 1:
+        P = np.diag(P)
+    if P.shape[0] != P.shape[1]:
+        raise ValueError(f"P_arrival must be square, got {P.shape}.")
+    if P.shape[0] == 0:
+        return np.zeros((0, 0))
+
+    evals, evecs = sla.eigh(P)
+    lam_max = max(float(np.max(evals)), 1.0)
+    thresh = tol * lam_max
+    w_evals = np.zeros_like(evals)
+    pos = evals > thresh
+    w_evals[pos] = np.minimum(1.0 / evals[pos], max_weight)
+    return evecs @ np.diag(w_evals) @ evecs.T
+
+
+def arrival_covariance_submatrix(
+    P: np.ndarray,
+    arrival_state_idx: np.ndarray | None,
+) -> np.ndarray:
+    """Extract the plant arrival block used in stage-0 cost."""
+    P = np.asarray(P, dtype=float)
+    if arrival_state_idx is None:
+        return P
+    idx = np.asarray(arrival_state_idx, dtype=int)
+    return P[np.ix_(idx, idx)]
+
+
 def _weight_to_cov(W: np.ndarray, name: str) -> np.ndarray:
     """Invert a diagonal or dense inverse-covariance weight matrix."""
     W = np.asarray(W, dtype=float)
@@ -32,6 +72,39 @@ def _weight_to_cov(W: np.ndarray, name: str) -> np.ndarray:
     return np.diag(1.0 / diag)
 
 
+def _plant_Q_from_process(proc, nx: int) -> np.ndarray:
+    """Return ``nx x nx`` plant process covariance ``Q`` (supports sparse kinematics)."""
+    G = getattr(proc, "_G_proc", None)
+    if G is not None:
+        from openmhe.builder.input_regs import plant_process_cov
+
+        return plant_process_cov(G, proc.weight.W, nx)
+
+    W_plant = np.asarray(proc.weight.W, dtype=float)
+    if W_plant.shape != (nx, nx):
+        W_plant = W_plant[:nx, :nx]
+
+    diag = np.diag(W_plant)
+    off = W_plant - np.diag(diag)
+    if np.any(np.abs(off) > 1e-12):
+        return _weight_to_cov(W_plant, "Process")
+    if np.all(diag > 0):
+        return _weight_to_cov(W_plant, "Process")
+    if not np.any(diag > 0):
+        raise ValueError(
+            "ProcessTerm requires at least one nonzero plant process-noise weight."
+        )
+
+    active = np.flatnonzero(diag > 0)
+    W_sparse = W_plant[np.ix_(active, active)]
+    G_plant = np.zeros((nx, active.size))
+    for j, idx in enumerate(active):
+        G_plant[idx, j] = 1.0
+    from openmhe.builder.input_regs import plant_process_cov
+
+    return plant_process_cov(G_plant, W_sparse, nx)
+
+
 def noise_covs_from_builder(
     builder: ObjectiveBuilder, nx: int, ny: int
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -43,7 +116,7 @@ def noise_covs_from_builder(
     if len(meas_terms) != 1:
         raise ValueError("Objective must contain exactly one MeasurementTerm.")
 
-    Q = _weight_to_cov(proc_terms[0].weight.W[:nx, :nx], "Process")
+    Q = _plant_Q_from_process(proc_terms[0], nx)
     R = _weight_to_cov(meas_terms[0].weight.W, "Measurement")
     return Q, R
 

@@ -11,6 +11,10 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
 from openmhe.frontend.system import SystemModel
 from openmhe.mhe_strategies import ObjectiveBuilder
+from openmhe.mhe_strategies.arrival_cost import (
+    arrival_covariance_submatrix,
+    invert_arrival_covariance,
+)
 from openmhe.frontend.acados_runtime import acados_root, ensure_acados_environment
 from openmhe.paths import get_codegen_dir, mhe_json_path
 from openmhe.builder.cost import (
@@ -27,6 +31,8 @@ from openmhe.builder.input_regs import (
     collect_sd_indices,
     cost_terms,
     merge_process_weight,
+    plant_arrival_state_indices,
+    sparse_process_noise_config,
     seed_reg_state_prior,
     term_kind,
     unmeasured_regulator_indices,
@@ -61,7 +67,14 @@ def _write_codegen_extra(
     Vu: np.ndarray,
     W: np.ndarray,
 ) -> None:
-    """Emit constant LTI matrices for optional fast-path / validation tooling."""
+    """Emit constant LTI matrices to ``c_generated_code/openmhe_mhe_extra.{h,c}``.
+
+    Written when the solver uses ``LINEAR_LS`` (all L2 penalties).  Exports the
+    augmented discrete ``A``, ``B``, measurement Jacobians ``Vx``/``Vu``, and
+    stage weight ``W`` for tooling and future standalone QP assembly.  The
+    current fast path still uses Acados submodules; these arrays are not
+    required at runtime for ``run_c_solver``.
+    """
     codegen = get_codegen_dir()
     header = codegen / "openmhe_mhe_extra.h"
     source = codegen / "openmhe_mhe_extra.c"
@@ -169,7 +182,12 @@ def _lti_fast_enabled(
     *,
     stacklevel: int = 1,
 ) -> bool:
-    """Return whether the LTI vector-only fast path may be used."""
+    """Return whether ``run_c_solver`` may use the LTI vector-only fast path.
+
+    Requires all-L2 (``LINEAR_LS``) penalties and ``nlp_solver_type='SQP_RTI'``.
+    Emits a :class:`UserWarning` and returns ``False`` when the solver type is
+    not RTI, so the C driver falls back to a full Acados solve each window.
+    """
     if not (lti_linear_ls_fast and linear_ls):
         return False
     if nlp_solver_type != "SQP_RTI":
@@ -285,6 +303,18 @@ def build_mhe_solver(
     (:class:`~openmhe.SteadyStateArrivalCost`, :class:`~openmhe.EKFArrivalCost`,
     :class:`~openmhe.UKFArrivalCost`). Pass only one of ``P_arrival`` or
     ``builder.arrival_cost``.
+
+    Parameters
+    ----------
+    nlp_solver_type : str
+        ``'SQP_RTI'`` (default) for real-time iteration; ``'SQP'`` for multi-iter
+        debugging.  The C fast path (``lti_linear_ls_fast``) requires ``SQP_RTI``.
+    lti_linear_ls_fast : bool
+        When ``True`` (default) and the cost is ``LINEAR_LS``, enable the
+        vector-only fast solve in :func:`~openmhe.run_c_solver` after the first
+        window.  Stored on the solver as ``solver._lti_linear_ls_fast``.  Has no
+        effect on :func:`~openmhe.run_solver` (Python loop always uses full
+        Acados solves).
     """
     arrival_cost = builder.arrival_cost
     if P_arrival is not None and arrival_cost is not None:
@@ -334,7 +364,7 @@ def build_mhe_solver(
         ui: nx_base + n_rw + n_fd + n_sd + j for j, ui in enumerate(sd_indices)
     }
 
-    nw = nx_base + n_rw
+    nw_full = nx_base + n_rw
     process_terms = [t for t in builder.terms if term_kind(t) == "PROCESS"]
     if len(process_terms) != 1:
         raise ValueError("Objective must contain exactly one ProcessTerm.")
@@ -348,7 +378,12 @@ def build_mhe_solver(
             f"ProcessTerm weight dim {process_terms[0].weight.dim} must equal "
             f"nx={nx_base} when no InputRandomWalk terms are present."
         )
+    else:
+        W_proc = np.asarray(process_terms[0].weight.W, dtype=float)
+    nw, W_proc, G_proc = sparse_process_noise_config(W_proc, nx_base, n_rw)
+    process_terms[0].weight.W = W_proc
     process_terms[0].weight.dim = nw
+    process_terms[0]._G_proc = G_proc
 
     nx = nx_base + n_rw + n_fd + 2 * n_sd
     x_base = ca.SX.sym("x_base", nx_base)
@@ -372,13 +407,12 @@ def build_mhe_solver(
         dyn_base += B_d[:, ui] * u_ctrl[controlled_idx.index(ui)]
     for ui in rw_indices:
         dyn_base += B_d[:, ui] * x[col_rw[ui]]
-    dyn_base += w[:nx_base]
+    G_dm = ca.DM(G_proc)
+    dyn_base += G_dm[:nx_base, :] @ w
 
     dyn_parts = [dyn_base]
     if n_rw:
-        dyn_parts.append(
-            x[nx_base : nx_base + n_rw] + w[nx_base : nx_base + n_rw]
-        )
+        dyn_parts.append(x[nx_base : nx_base + n_rw] + G_dm[nx_base:, :] @ w)
     if n_fd:
         fd_next = [
             _u_expr(ui, controlled_idx, u_ctrl, x, col_rw) for ui in fd_indices
@@ -495,14 +529,39 @@ def build_mhe_solver(
         ocp.constraints.lbu = np.zeros(len(pin_u_idx))
         ocp.constraints.ubu = np.zeros(len(pin_u_idx))
 
+    arrival_state_idx = (
+        plant_arrival_state_indices(G_proc, nx_base) if P_arrival is not None else None
+    )
+    n_arrival = (
+        nx_base
+        if arrival_state_idx is None
+        else int(arrival_state_idx.size)
+    )
+
     use_conl = needs_conl(builder)
     if use_conl:
         arrival_slice, n_residual_0, W0_template = build_conl_cost(
-            ocp, model, Vx, Vu, builder, n_residual, nx_base, P_arrival
+            ocp,
+            model,
+            Vx,
+            Vu,
+            builder,
+            n_residual,
+            nx_base,
+            P_arrival,
+            arrival_state_idx,
         )
     else:
         arrival_slice, n_residual_0, W0_template = build_linear_ls_cost(
-            ocp, Vx, Vu, builder, n_residual, nx, nx_base, P_arrival
+            ocp,
+            Vx,
+            Vu,
+            builder,
+            n_residual,
+            nx,
+            nx_base,
+            P_arrival,
+            arrival_state_idx,
         )
 
     mode = cost_mode_tag(builder)
@@ -530,6 +589,8 @@ def build_mhe_solver(
     solver._nx = nx
     solver._nx_base = nx_base
     solver._nw = nw
+    solver._nw_full = nw_full
+    solver._G_proc = G_proc
     solver._N = N_horizon
     solver._builder = builder
     solver._arrival_slice = arrival_slice
@@ -548,8 +609,10 @@ def build_mhe_solver(
     solver._cost_mode = mode
     solver._arrival_cost = arrival_cost
     solver._W0_template = W0_template
+    solver._arrival_state_idx = arrival_state_idx
+    solver._n_arrival = n_arrival
     solver._arrival_W_slice = (
-        slice(n_residual, n_residual + nx_base) if arrival_slice is not None else None
+        slice(n_residual, n_residual + n_arrival) if arrival_slice is not None else None
     )
     solver._dt = dt
     solver._system = mhe_system
@@ -683,13 +746,21 @@ def run_solver(solver, y, u, post_steps=None):
             if j == 0 and has_arrival:
                 yref0[: yref.size] = yref
                 if arrival_cost is not None:
-                    yref0[arrival_slice] = x_bar
+                    arr_idx = solver._arrival_state_idx
+                    yref0[arrival_slice] = (
+                        x_bar if arr_idx is None else x_bar[arr_idx]
+                    )
                 else:
-                    yref0[arrival_slice] = x_prior[:nx_base]
+                    arr_idx = solver._arrival_state_idx
+                    x_ref = x_prior[:nx_base]
+                    yref0[arrival_slice] = x_ref if arr_idx is None else x_ref[arr_idx]
                 solver.set(0, "yref", yref0)
                 if dynamic_arrival:
                     W0 = W0_template.copy()
-                    W0[arrival_W_slice, arrival_W_slice] = np.linalg.inv(P_arr)
+                    P_sub = arrival_covariance_submatrix(P_arr, solver._arrival_state_idx)
+                    W0[arrival_W_slice, arrival_W_slice] = invert_arrival_covariance(
+                        P_sub
+                    )
                     solver.cost_set(0, "W", W0, api="new")
             else:
                 solver.set(j, "yref", yref)

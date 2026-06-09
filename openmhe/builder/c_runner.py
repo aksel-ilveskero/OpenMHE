@@ -12,6 +12,10 @@ from pathlib import Path
 import numpy as np
 
 from openmhe.builder.input_regs import unmeasured_regulator_indices
+from openmhe.mhe_strategies.arrival_cost import (
+    arrival_covariance_submatrix,
+    invert_arrival_covariance,
+)
 from openmhe.builder.solver import WindowStep, _lti_fast_enabled, _precompute_yrefs
 from openmhe.frontend.acados_runtime import (
     acados_root,
@@ -39,6 +43,7 @@ class _RunConfig(ctypes.Structure):
         ("nu_ctrl", ctypes.c_int),
         ("ny_stage", ctypes.c_int),
         ("ny0", ctypes.c_int),
+        ("n_arrival", ctypes.c_int),
         ("has_arrival", ctypes.c_int),
         ("arrival_off", ctypes.c_int),
         ("dynamic_arrival", ctypes.c_int),
@@ -187,6 +192,7 @@ def _precompute_arrival(
     nx_base: int,
     W0_template: np.ndarray,
     arrival_w_slice: slice,
+    arrival_state_idx: np.ndarray | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Python arrival pass (EKF / UKF dynamic weights for the C driver)."""
     x_bar_stage = np.zeros((n_est, nx_base), dtype=np.float64, order="C")
@@ -196,7 +202,8 @@ def _precompute_arrival(
         x_bar, P = arrival_cost.window_prior(idx, y, u)
         x_bar_stage[idx, :] = x_bar
         W0 = W0_template.copy()
-        W0[arrival_w_slice, arrival_w_slice] = np.linalg.inv(P)
+        P_sub = arrival_covariance_submatrix(P, arrival_state_idx)
+        W0[arrival_w_slice, arrival_w_slice] = invert_arrival_covariance(P_sub)
         W0_stage[idx, :, :] = W0
     return x_bar_stage, W0_stage
 
@@ -214,6 +221,18 @@ def run_c_solver(
 
     ``post_steps`` are applied in Python after the C loop (same semantics as
     :func:`~openmhe.run_solver`).
+
+    Parameters
+    ----------
+    rebuild : bool
+        Force recompilation of ``libopenmhe_mhe_run.so`` when codegen or C
+        sources changed.
+    lti_linear_ls_fast : bool or None
+        Override ``solver._lti_linear_ls_fast``.  When enabled (default for
+        all-L2 builds with ``SQP_RTI``), window 0 runs a full Acados solve and
+        condenses the QP left-hand side; later windows refresh QP vectors only.
+        Requires ``nlp_solver_type='SQP_RTI'``; otherwise a warning is emitted
+        and the full solve is used.  See ``openmhe/c_solver/README.md``.
     """
     from openmhe.mhe_strategies.arrival_cost import UKFArrivalCost
 
@@ -240,6 +259,7 @@ def run_c_solver(
         _c_double_p,
         _c_double_p,
         _c_double_p,
+        _c_int_p,
         _c_int_p,
         _c_int_p,
         _c_int_p,
@@ -318,6 +338,7 @@ def run_c_solver(
             nx_base,
             W0_template,
             solver._arrival_W_slice,
+            solver._arrival_state_idx,
         )
 
     nu_ocp = solver._nu_ctrl + solver._nw
@@ -331,6 +352,7 @@ def run_c_solver(
         nu_ctrl=solver._nu_ctrl,
         ny_stage=ny_stage,
         ny0=solver._n_residual_0 if has_arrival else ny_stage,
+        n_arrival=int(solver._n_arrival) if has_arrival else 0,
         has_arrival=int(has_arrival),
         arrival_off=int(solver._arrival_slice.start) if has_arrival else 0,
         dynamic_arrival=int(W0_stage is not None),
@@ -395,6 +417,9 @@ def run_c_solver(
             sd1_col.ctypes.data_as(_c_int_p),
             sd2_col.ctypes.data_as(_c_int_p),
             unmeasured_ui.ctypes.data_as(_c_int_p),
+            _i32(solver._arrival_state_idx).ctypes.data_as(_c_int_p)
+            if solver._arrival_state_idx is not None
+            else None,
             u_meas.ctypes.data_as(_c_double_p) if u_meas is not None else None,
             _f64(u_hat_rm).ctypes.data_as(_c_double_p),
             _f64(x_hat_rm).ctypes.data_as(_c_double_p),

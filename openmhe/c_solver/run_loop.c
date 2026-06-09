@@ -1,3 +1,10 @@
+/**
+ * Sliding-window MHE driver (C counterpart of ``openmhe.run_solver``).
+ *
+ * Sets per-window references and pins, seeds regulator states, dispatches
+ * either a full Acados solve or the LTI fast path (``lti_fast.c``), then
+ * warm-starts the next window.  See ``openmhe/c_solver/README.md``.
+ */
 #define _POSIX_C_SOURCE 199309L
 
 #include <string.h>
@@ -241,19 +248,27 @@ static void set_stage0_yref(
     int ny0,
     int ny_stage,
     int arrival_off,
-    int nx_base,
+    int n_arrival,
+    const int *arrival_state_idx,
     const double *yref_j,
     const double *x_bar,
     double *yref0)
 {
     memset(yref0, 0, (size_t)ny0 * sizeof(double));
     memcpy(yref0, yref_j, (size_t)ny_stage * sizeof(double));
-    if (x_bar != NULL) {
-        memcpy(&yref0[arrival_off], x_bar, (size_t)nx_base * sizeof(double));
+    if (x_bar != NULL && n_arrival > 0) {
+        if (arrival_state_idx == NULL) {
+            memcpy(&yref0[arrival_off], x_bar, (size_t)n_arrival * sizeof(double));
+        } else {
+            for (int i = 0; i < n_arrival; ++i) {
+                yref0[arrival_off + i] = x_bar[arrival_state_idx[i]];
+            }
+        }
     }
     set_yref_stage(nlp_config, nlp_dims, nlp_in, 0, yref0);
 }
 
+/** Factor the condensed QP Hessian / coupling once (after a full RTI prep step). */
 static void openmhe_condense_qp_lhs(
     ocp_nlp_config *config,
     ocp_nlp_dims *dims,
@@ -282,6 +297,14 @@ static void openmhe_profile_add_acados(
     (void)config;
 }
 
+/**
+ * Solve one sliding-window NLP.
+ *
+ * Fast path (``openmhe_mhe_solve_lti_fast``) is attempted from window 1 onward
+ * when ``use_fast`` is set and either the condensed LHS is valid or dynamic
+ * arrival requires a stage-0 Hessian refresh.  On failure, ``use_fast`` is
+ * cleared and subsequent windows use the full Acados solve.
+ */
 static int openmhe_mhe_solve_window(
     openmhe_mhe_solver_capsule *capsule,
     ocp_nlp_solver *nlp_solver,
@@ -332,6 +355,7 @@ int openmhe_mhe_run_sliding(
     const int *sd1_col,
     const int *sd2_col,
     const int *unmeasured_ui,
+    const int *arrival_state_idx,
     const double *u_meas,
     double *u_hat,
     double *x_hat,
@@ -346,6 +370,7 @@ int openmhe_mhe_run_sliding(
     const int nu_ctrl = cfg->nu_ctrl;
     const int ny_stage = cfg->ny_stage;
     const int ny0 = cfg->ny0;
+    const int n_arrival = cfg->n_arrival;
     const int n_pin = cfg->n_pin;
     const int n_est = n_steps - N;
 
@@ -402,11 +427,11 @@ int openmhe_mhe_run_sliding(
     OPENMHE_PROF_DECL;
 
     int status = 0;
-    int lhs_valid = 0;
+    int lhs_valid = 0; /* condensed QP LHS reusable across windows */
     int use_fast = 0;
     if (cfg->lti_linear_ls_fast && cfg->linear_ls
         && openmhe_mhe_is_linear_ls_plan(capsule)) {
-        use_fast = 1;
+        use_fast = 1; /* first window always runs full solve + condense_lhs */
     }
 
     for (int idx = 0; idx < n_est; ++idx) {
@@ -451,7 +476,7 @@ int openmhe_mhe_run_sliding(
             if (j == 0 && cfg->has_arrival) {
                 set_stage0_yref(
                     nlp_config, nlp_dims, nlp_in, ny0, ny_stage, cfg->arrival_off,
-                    nx_base, yref_j, x_bar_win, yref0);
+                    n_arrival, arrival_state_idx, yref_j, x_bar_win, yref0);
                 if (cfg->dynamic_arrival && W0_stage_pre != NULL) {
                     const double *W_win = W0_stage_pre
                         + (size_t)idx * (size_t)ny0 * (size_t)ny0;

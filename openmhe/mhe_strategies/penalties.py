@@ -63,14 +63,23 @@ class NoiseWeight:
                     f"Expected noise array of length {self.dim}, got {len(val)}."
                 )
             if std is not None:
-                val = np.maximum(val, epsilon)
-                return np.diag(1.0 / (val**2))
+                w = np.zeros(len(val))
+                pos = val > 0
+                if np.any(pos):
+                    w[pos] = 1.0 / (val[pos] ** 2)
+                return np.diag(w)
             if cov is not None:
-                val = np.maximum(val, epsilon)
-                return np.diag(1.0 / val)
+                w = np.zeros(len(val))
+                pos = val > 0
+                if np.any(pos):
+                    w[pos] = 1.0 / val[pos]
+                return np.diag(w)
             if inv_cov is not None:
-                val = np.minimum(val, max_weight)
-                return np.diag(val)
+                w = np.zeros(len(val))
+                pos = val > 0
+                if np.any(pos):
+                    w[pos] = np.minimum(val[pos], max_weight)
+                return np.diag(w)
 
         if val.ndim == 2:
             if val.shape != (self.dim, self.dim):
@@ -82,6 +91,18 @@ class NoiseWeight:
                     "Cannot process a 2D matrix for 'std'. Use 'cov' or 'inv_cov'."
                 )
             if cov is not None:
+                diag = np.diag(val)
+                if np.any(diag <= 0):
+                    if not np.allclose(val - np.diag(diag), 0):
+                        raise ValueError(
+                            "Strict kinematics (zero process cov entries) requires "
+                            "a diagonal cov matrix."
+                        )
+                    w = np.zeros(self.dim)
+                    pos = diag > 0
+                    if np.any(pos):
+                        w[pos] = 1.0 / diag[pos]
+                    return np.diag(w)
                 safe_cov = val + (np.eye(self.dim) * epsilon)
                 return np.linalg.inv(safe_cov)
             if inv_cov is not None:

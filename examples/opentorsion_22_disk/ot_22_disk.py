@@ -251,35 +251,17 @@ def load_feather(plot: bool = False, N: int = 1) -> np.ndarray:
     return time, np.column_stack((e1, e2, t1, t2)), u_m, u_p
 
 if __name__ == "__main__":
-    sim_t, measurement_data, motor, propeller = load_feather(plot=False, N=2)
+    sim_t, measurement_data, motor, propeller = load_feather(plot=False, N=1)
     dt = np.mean(np.diff(sim_t))
 
     # Rearrange measurement data to be in the same order as the model
     all_measurements = measurement_data[:, [2,3,0,1]]
 
-    # Loop through different sensor configs:
-    # U1, T1, E1, E2, U1/T1, U1/T1/E1/E2, T1/E1/E2, E1/E2, U1/E1/E2
+    # Possible sensors:
+    # torque1, velocity1, velocity2
 
-    """
-    sensor_configs = [
-        ["input", "torque1", "velocity1", "velocity2"],
-        ["input", "velocity1", "velocity2"],
-        ["input", "torque1", "velocity1"],
-        ["input", "torque1", "velocity2"],
-        ["torque1", "velocity1", "velocity2"],
-        ["input", "torque1"],
-        ["velocity1", "torque1"],
-        ["velocity2", "torque1"],
-        ["velocity1", "velocity2"],
-        ["input", "velocity1"],
-        ["input", "velocity2"],
-        ["velocity1"],
-        ["velocity2"],
-        ["torque1"],
-    ]
-    """
-
-    sensor_configs = [["torque1", "velocity2"]]
+    sensors = ["torque1", "velocity1"]
+    use_input = False
 
     state_index_connection = {
         "torque1": 8,
@@ -293,138 +275,142 @@ if __name__ == "__main__":
         "velocity2": 3,
     }
 
-    W_COV = 0.01
-    V_COV = 0.5
-    LOAD_LAMBDA = 0.1
+    measured_states = [state_index_connection[sensor] for sensor in sensors]
+    state_sensor_indices = [state_sensor_connection[sensor] for sensor in sensors]
 
-    for sensor_config in sensor_configs:
-        measured_states = [state_index_connection[sensor] for sensor in sensor_config]
-        state_sensor_indices = [state_sensor_connection[sensor] for sensor in sensor_config]
+    # openmhe expects (channels, samples); the loaded data is (samples, channels)
+    y = all_measurements[:, state_sensor_indices].T
 
-        # openmhe expects (channels, samples); the loaded data is (samples, channels)
-        y = all_measurements[:, state_sensor_indices].T
+    test_bench = TestBench(measured_states)
+    mhe_system = mhe.SystemModel.from_matrices(
+        test_bench.A,
+        test_bench.B,
+        test_bench.C,
+        test_bench.D,
+        is_discrete=False,
+        dt=dt,
+    )
 
-        test_bench = TestBench(measured_states)
-        mhe_system = mhe.SystemModel.from_matrices(
-            test_bench.A,
-            test_bench.B,
-            test_bench.C,
-            test_bench.D,
-            is_discrete=False,
-            dt=dt,
+    n_window = 35
+    ny, nx, nu = mhe_system.ny, mhe_system.nx, mhe_system.nu
+
+    w_cov = np.zeros(nx)
+    w_cov[21] = 0.1
+    w_cov[32] = 0.1
+    w_cov[38] = 0.1
+    w_cov[42] = 0.1
+
+    v_cov = 0.5
+    load_lambda = 0.1
+
+    # Known motor torque drives input 0; load (input 1) is estimated.
+    u = np.zeros((nu, y.shape[1]))
+    u[0, :] = motor
+
+    mhe_objective = mhe.ObjectiveBuilder()
+
+    mhe_objective.add(
+        mhe.MeasurementTerm(
+            penalty=mhe.L2Penalty(),
+            weight=mhe.NoiseWeight(dim=ny, cov=v_cov),
+        )
+    )
+    mhe_objective.add(
+        mhe.ProcessTerm(
+            penalty=mhe.L2Penalty(),
+            weight=mhe.NoiseWeight(dim=nx, cov=w_cov),
+        )
+    )
+
+    mhe_objective.add(
+            mhe.InputRandomWalk(target_idx=[1], lambda_u=load_lambda),
         )
 
-        n_window = 15
-        ny, nx, nu = mhe_system.ny, mhe_system.nx, mhe_system.nu
-
-        # Known motor torque drives input 0; load (input 1) is estimated.
-        u = np.zeros((nu, y.shape[1]))
-        u[0, :] = motor
-
-        mhe_objective = mhe.ObjectiveBuilder()
-
+    if use_input:
         mhe_objective.add(
-            mhe.MeasurementTerm(
-                penalty=mhe.L2Penalty(),
-                weight=mhe.NoiseWeight(dim=ny, cov=V_COV),
-            )
+            mhe.InputTrackingTerm(target_idx=[0], weight=mhe.NoiseWeight(dim=1, cov=w_cov[0]), reference="measured")
         )
+    else:
         mhe_objective.add(
-            mhe.ProcessTerm(
-                penalty=mhe.L2Penalty(),
-                weight=mhe.NoiseWeight(dim=nx, cov=W_COV),
-            )
+            mhe.InputRandomWalk(target_idx=[0], lambda_u=load_lambda)
         )
 
-        mhe_objective.add(
-                mhe.InputRandomWalk(target_idx=[1], lambda_u=LOAD_LAMBDA),
-            )
+    mhe_objective.add(mhe.EKFArrivalCost(mhe_system, builder=mhe_objective))
 
-        if "input" in sensor_config:
-            mhe_objective.add(
-                mhe.InputTrackingTerm(target_idx=[0], reference="measured")
-            )
-        else:
-            mhe_objective.add(
-                mhe.InputRandomWalk(target_idx=[0], lambda_u=LOAD_LAMBDA)
-            )
+    print("Compiling ACADOS solver...")
+    solver = mhe.build_mhe_solver(
+        mhe_system,
+        n_window,
+        mhe_objective,
+        dt=dt,
+        already_discrete=True,
+        qp_solver="PARTIAL_CONDENSING_HPIPM",
+    )
 
-        mhe_objective.add(mhe.EKFArrivalCost(mhe_system, builder=mhe_objective))
+    print("Running MHE (C solver, -O3 -march=native -ffast-math)...")
+    u_hat, x_hat = mhe.run_c_solver(solver, y, u)
 
-        print("Compiling ACADOS solver...")
-        solver = mhe.build_mhe_solver(
-            mhe_system,
-            n_window,
-            mhe_objective,
-            dt=dt,
-            already_discrete=True,
-            qp_solver="PARTIAL_CONDENSING_HPIPM",
-        )
+    # run_solver returns estimates at the last stage of each window (index k-1).
+    n_est = x_hat.shape[1]
+    sl = slice(n_window - 1, n_window - 1 + n_est)
+    t_est = sim_t[sl]
+    t2_true = all_measurements[sl, 1]
+    t2_est = x_hat[18, :]
+    prop_true = propeller[sl]
+    prop_est = -1 * u_hat[1, :]
 
-        print("Running MHE (C solver, -O3 -march=native -ffast-math)...")
-        u_hat, x_hat = mhe.run_c_solver(solver, y, u)
+    t2_rmse = np.sqrt(np.nanmean((t2_est - t2_true) ** 2))
+    prop_rmse = np.sqrt(np.nanmean((prop_est - prop_true) ** 2))
+    print(f"t2 RMSE (MHE): {t2_rmse:.4f}")
+    print(f"Propeller u[1] RMSE (MHE): {prop_rmse:.4f}")
 
-        # run_solver returns estimates at the last stage of each window (index k-1).
-        n_est = x_hat.shape[1]
-        sl = slice(n_window - 1, n_window - 1 + n_est)
-        t_est = sim_t[sl]
-        t2_true = all_measurements[sl, 1]
-        t2_est = x_hat[18, :]
-        prop_true = propeller[sl]
-        prop_est = -1 * u_hat[1, :]
+    zoom = (8.6, 9.0)
+    zoom_mask = (t_est >= zoom[0]) & (t_est <= zoom[1])
 
-        t2_rmse = np.sqrt(np.nanmean((t2_est - t2_true) ** 2))
-        prop_rmse = np.sqrt(np.nanmean((prop_est - prop_true) ** 2))
-        print(f"t2 RMSE (MHE): {t2_rmse:.4f}")
-        print(f"Propeller u[1] RMSE (MHE): {prop_rmse:.4f}")
+    series = [
+        ("t2 torque", t2_true, t2_est, (-1, 28)),
+        ("Propeller u[1]", prop_true, prop_est, (-5, 22)),
+    ]
 
-        zoom = (8.0, 8.2)
-        zoom_mask = (t_est >= zoom[0]) & (t_est <= zoom[1])
+    n_panels = len(series)
+    fig, axes = plt.subplots(
+        n_panels,
+        2,
+        figsize=(14, 2.2 * n_panels),
+        sharex="col",
+        width_ratios=[1.4, 1],
+    )
+    if n_panels == 1:
+        axes = np.array([axes])
 
-        series = [
-            ("t2 torque", t2_true, t2_est, (-1, 28)),
-            ("Propeller u[1]", prop_true, prop_est, (-5, 22)),
-        ]
+    for row, (ylabel, true, est, ylim) in enumerate(series):
+        full_rmse = np.sqrt(np.nanmean((est - true) ** 2))
+        zoom_rmse = np.sqrt(np.nanmean((est[zoom_mask] - true[zoom_mask]) ** 2))
 
-        n_panels = len(series)
-        fig, axes = plt.subplots(
-            n_panels,
-            2,
-            figsize=(14, 2.2 * n_panels),
-            sharex="col",
-            width_ratios=[1.4, 1],
-        )
-        if n_panels == 1:
-            axes = np.array([axes])
+        for col, (t_lo, t_hi, rmse, subtitle) in enumerate(
+            [
+                (t_est[0], t_est[-1], full_rmse, "Full window"),
+                (zoom[0], zoom[1], zoom_rmse, f"Zoom {zoom[0]:g}–{zoom[1]:g} s"),
+            ]
+        ):
+            ax = axes[row, col]
+            ax.plot(t_est, true, "k-", label="True")
+            ax.plot(t_est, est, "b--", linewidth=1.5, label="MHE", alpha=0.7)
+            ax.set_xlim(t_lo, t_hi)
+            ax.set_ylim(*ylim)
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"{subtitle}  |  RMSE = {rmse:.4f}", fontsize=9, loc="left")
+            ax.grid(True, alpha=0.3)
+            if row == 0:
+                ax.legend(loc="upper right", fontsize=8)
 
-        for row, (ylabel, true, est, ylim) in enumerate(series):
-            full_rmse = np.sqrt(np.nanmean((est - true) ** 2))
-            zoom_rmse = np.sqrt(np.nanmean((est[zoom_mask] - true[zoom_mask]) ** 2))
-
-            for col, (t_lo, t_hi, rmse, subtitle) in enumerate(
-                [
-                    (t_est[0], t_est[-1], full_rmse, "Full window"),
-                    (zoom[0], zoom[1], zoom_rmse, f"Zoom {zoom[0]:g}–{zoom[1]:g} s"),
-                ]
-            ):
-                ax = axes[row, col]
-                ax.plot(t_est, true, "k-", label="True")
-                ax.plot(t_est, est, "b--", linewidth=1.5, label="MHE", alpha=0.7)
-                ax.set_xlim(t_lo, t_hi)
-                ax.set_ylim(*ylim)
-                ax.set_ylabel(ylabel)
-                ax.set_title(f"{subtitle}  |  RMSE = {rmse:.4f}", fontsize=9, loc="left")
-                ax.grid(True, alpha=0.3)
-                if row == 0:
-                    ax.legend(loc="upper right", fontsize=8)
-
-        axes[-1, 0].set_xlabel("Time (s)")
-        axes[-1, 1].set_xlabel("Time (s)")
-        fig.suptitle(
-            f"MHE estimates ({', '.join(sensor_config)})",
-            y=1.002,
-        )
-        fig.tight_layout()
-        plt.show()
+    axes[-1, 0].set_xlabel("Time (s)")
+    axes[-1, 1].set_xlabel("Time (s)")
+    fig.suptitle(
+        f"MHE estimates ({', '.join(sensors)})",
+        y=1.002,
+    )
+    fig.tight_layout()
+    plt.show()
 
     

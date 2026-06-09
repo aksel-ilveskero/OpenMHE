@@ -19,6 +19,15 @@ If you see a **dimension mismatch** (`status -3` / stale `libopenmhe_mhe_run.so`
 2. Call `run_c_solver(..., rebuild=True)` or `make -C openmhe/c_solver clean all`.
 3. In Jupyter, **restart the kernel** after changing problem size — Python may keep an old `.so` mapped in memory until the process exits.
 
+## Source layout
+
+| File | Role |
+|------|------|
+| `run_loop.c` / `run_loop.h` | Sliding-window driver: yref/pin setup, warm-start shift, per-window solve dispatch |
+| `lti_fast.c` / `lti_fast.h` | LTI + `LINEAR_LS` vector-only SQP-RTI step |
+| `profile.h` | Optional per-window timing (`OPENMHE_PROFILE=1`) |
+| `filter_arrival.h` | Arrival-filter helpers (unit-tested separately) |
+
 ## Profiling
 
 Per-window setup / solve / warm-start timings (stderr), plus Acados
@@ -28,15 +37,87 @@ Per-window setup / solve / warm-start timings (stderr), plus Acados
 make -C openmhe/c_solver OPENMHE_PROFILE=1 ...
 ```
 
-### LTI + LINEAR_LS fast path
+## LTI + LINEAR_LS fast path
 
-When the solver is built with all-L2 penalties (`LINEAR_LS`), `run_c_solver(...,
-lti_linear_ls_fast=True)` (default) reuses condensed QP factors after the first
-window: dynamics Jacobians and stage Hessians are skipped, only QP vectors are
-refreshed. Disable with `lti_linear_ls_fast=False`. Requires
-`build_mhe_solver(..., lti_linear_ls_fast=True)` (default for `LINEAR_LS`) and
-`nlp_solver_type='SQP_RTI'`; otherwise a warning is emitted and the full solve is used.
-Constant `A`, `B`, `Vx`, `Vu`, `W` are exported to `c_generated_code/openmhe_mhe_extra.{h,c}`.
+For **linear** plants with **all-L2** penalties, the Gauss-Newton QP Hessian and
+dynamics coupling are constant across sliding windows.  After one full SQP-RTI
+preparation step, later windows can skip Jacobian / Hessian assembly and reuse
+**precondensed QP factors**, updating only the right-hand side (references,
+gradients, bound changes from `KnownInput` pins).
+
+### Requirements
+
+| Requirement | Reason |
+|-------------|--------|
+| All terms use `L2Penalty` (`LINEAR_LS` mode) | Constant stage Hessians |
+| LTI dynamics (fixed `A`, `B` at codegen) | Constant dynamics Jacobians |
+| `nlp_solver_type='SQP_RTI'` | Fast path calls RTI vector assembly + `precondensed_lhs` QP solve |
+| `lti_linear_ls_fast=True` (default for LS builds) | Opt-in flag on solver and `run_c_solver` |
+
+Non-RTI solvers (`SQP`) or `CONVEX_OVER_NONLINEAR` costs disable the fast path.
+Python emits a `UserWarning` and the C driver uses a full `openmhe_mhe_acados_solve`
+every window.
+
+### Python API
+
+```python
+solver = mhe.build_mhe_solver(
+    model, N_horizon, builder, dt=dt,
+    nlp_solver_type="SQP_RTI",      # required for fast path
+    lti_linear_ls_fast=True,        # default when cost is LINEAR_LS
+)
+u_hat, x_hat = mhe.run_c_solver(
+    solver, y, u,
+    lti_linear_ls_fast=True,        # default: solver._lti_linear_ls_fast
+    rebuild=False,
+)
+```
+
+Disable explicitly with `lti_linear_ls_fast=False` on `build_mhe_solver` or
+`run_c_solver`.
+
+### Per-window behaviour
+
+```
+Window 0:  full openmhe_mhe_acados_solve  →  condense_qp_lhs  →  lhs_valid = 1
+Window k>0 (fast):  openmhe_mhe_solve_lti_fast  →  vectors only  →  solve_qp(precondensed_lhs)
+```
+
+`openmhe_mhe_solve_lti_fast` (`lti_fast.c`):
+
+1. `update_qp_matrices` on dynamics, cost, constraints (still needed for `KnownInput` pins and changing `yref`).
+2. Skip cost Hessians except stage 0 when dynamic arrival updates `W0`.
+3. Levenberg–Marquardt term, `ocp_nlp_approximate_qp_vectors_sqp`, QP solve with reused LHS.
+4. RTI globalization.
+
+On QP failure or a bad status, `use_fast` is cleared and remaining windows fall back to the full solve.
+
+### Dynamic EKF arrival
+
+When `EKFArrivalCost` supplies a time-varying stage-0 weight `W0`, each window
+refreshes the stage-0 Hessian (`stage0_full_hess=1`).  The condensed LHS is
+invalidated for that window but rebuilt on the next full solve.  Fast steps
+between windows still skip stages `1…N` Hessians.
+
+### Codegen export (`openmhe_mhe_extra.{h,c}`)
+
+`build_mhe_solver` writes constant augmented matrices to `c_generated_code/`:
+
+- `OPENMHE_MHE_A`, `OPENMHE_MHE_B` — discrete augmented dynamics
+- `OPENMHE_MHE_Vx`, `OPENMHE_MHE_Vu` — measurement / residual Jacobians
+- `OPENMHE_MHE_W` — stage cost weight
+
+These support validation tooling and a future standalone RHS assembler; the
+current fast path still goes through Acados NLP submodules.
+
+### Tests
+
+```bash
+pytest tests/test_lti_fast.py -q
+```
+
+Compares fast vs full C solve and vs Python `run_solver` on tiny LTI problems,
+including `KnownInput`, EKF arrival, and non-RTI fallback.
 
 ## Unit tests (filters, linear algebra)
 

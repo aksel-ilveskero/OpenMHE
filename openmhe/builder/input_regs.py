@@ -292,3 +292,75 @@ def merge_process_weight(
         f"ProcessTerm weight must be ({nx_base}, {nx_base}) or ({nw}, {nw}); "
         f"got {W.shape} with {n_rw} random-walk input(s)."
     )
+
+
+def sparse_process_noise_config(
+    W_full: np.ndarray,
+    nx_base: int,
+    n_rw: int,
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """Shrink process-noise channels with zero diagonal weight (strict kinematics).
+
+    Returns ``(nw, W_sparse, G)`` where ``G`` has shape ``(nx_base + n_rw, nw)``
+    and maps the reduced noise vector ``w`` into the full plant + RW injection
+  sites ``[x_base; x_rw]``.
+    """
+    nw_full = nx_base + n_rw
+    W_full = np.asarray(W_full, dtype=float)
+    if W_full.shape != (nw_full, nw_full):
+        raise ValueError(
+            f"Expected process weight ({nw_full}, {nw_full}), got {W_full.shape}."
+        )
+    off_diag = W_full - np.diag(np.diag(W_full))
+    if np.any(np.abs(off_diag) > 0):
+        raise ValueError(
+            "Strict kinematics (zero process cov entries) requires a diagonal "
+            "process weight matrix."
+        )
+    diag = np.diag(W_full)
+    active = np.flatnonzero(diag > 0)
+    nw = int(active.size)
+    if nw == 0:
+        raise ValueError(
+            "ProcessTerm requires at least one nonzero process-noise weight."
+        )
+    if nw == nw_full:
+        return nw, W_full, np.eye(nw_full)
+
+    W_sparse = W_full[np.ix_(active, active)]
+    G = np.zeros((nw_full, nw))
+    for j, idx in enumerate(active):
+        G[idx, j] = 1.0
+    return nw, W_sparse, G
+
+
+def plant_arrival_state_indices(
+    G_proc: np.ndarray,
+    nx_base: int,
+) -> np.ndarray | None:
+    """Plant state indices that receive arrival cost under strict kinematics.
+
+    Returns ``None`` when every plant state is included (dense process noise).
+    """
+    Gp = np.asarray(G_proc[:nx_base, :], dtype=float)
+    if Gp.shape[1] == nx_base and np.allclose(Gp, np.eye(nx_base)):
+        return None
+    idx = np.unique(np.nonzero(Gp)[0]).astype(int)
+    if idx.size == nx_base:
+        return None
+    return idx
+
+
+def plant_process_cov(
+    G: np.ndarray,
+    W_sparse: np.ndarray,
+    nx_base: int,
+) -> np.ndarray:
+    """Map sparse process weights to ``nx_base x nx_base`` plant covariance ``Q``."""
+    Gp = np.asarray(G[:nx_base, :], dtype=float)
+    W = np.asarray(W_sparse, dtype=float)
+    diag_w = np.diag(W) if W.ndim == 2 else W
+    if np.any(diag_w <= 0):
+        raise ValueError("Plant process covariance requires positive sparse weights.")
+    cov_w = 1.0 / diag_w
+    return Gp @ np.diag(cov_w) @ Gp.T

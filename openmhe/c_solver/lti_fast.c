@@ -1,3 +1,16 @@
+/**
+ * Implementation of the LTI + LINEAR_LS fast SQP-RTI path.
+ *
+ * Algorithm (per window, after window 0 has built ``lhs_valid``):
+ *   1. ``update_qp_matrices`` on dynamics / cost / constraints (no Hessians).
+ *   2. Levenberg-Marquardt regularisation term into the QP.
+ *   3. ``ocp_nlp_approximate_qp_vectors_sqp`` (rhs only).
+ *   4. ``ocp_nlp_solve_qp_and_correct_dual`` with ``precondensed_lhs=true``.
+ *   5. RTI globalization (full step for LTI).
+ *
+ * Window 0 and any failed fast step fall back to a full
+ * ``openmhe_mhe_acados_solve`` in ``run_loop.c``, which also condenses the LHS.
+ */
 #include "blasfeo_d_aux.h"
 #include "acados/ocp_nlp/ocp_nlp_common.h"
 #include "acados/ocp_nlp/ocp_nlp_sqp_rti.h"
@@ -29,6 +42,7 @@ int openmhe_mhe_is_linear_ls_plan(openmhe_mhe_solver_capsule *capsule)
     return 1;
 }
 
+/** Assemble QP vectors without recomputing constant Jacobians / Hessians. */
 static void openmhe_approximate_qp_vectors_only(
     ocp_nlp_config *config,
     ocp_nlp_dims *dims,

@@ -8,6 +8,7 @@ from acados_template import AcadosOcp
 
 from openmhe.builder.input_regs import cost_terms
 from openmhe.mhe_strategies import ObjectiveBuilder
+from openmhe.mhe_strategies.arrival_cost import invert_arrival_covariance
 from openmhe.mhe_strategies.penalties import BasePenalty, L2Penalty, _quadratic_form
 
 
@@ -76,8 +77,11 @@ def build_linear_ls_cost(
     nx: int,
     nx_base: int,
     P_arrival: np.ndarray | None,
+    arrival_state_idx: np.ndarray | None = None,
 ) -> tuple[slice | None, int, np.ndarray | None]:
     """Configure LINEAR_LS path and terminal cost. Returns arrival_slice, n_residual_0, W_0."""
+    from openmhe.mhe_strategies.arrival_cost import arrival_covariance_submatrix
+
     ocp.cost.cost_type = "LINEAR_LS"
     ocp.cost.cost_type_e = "LINEAR_LS"
     ocp.cost.Vx = Vx
@@ -86,15 +90,25 @@ def build_linear_ls_cost(
     ocp.cost.yref = np.zeros(n_residual)
 
     if P_arrival is not None:
-        ny0 = n_residual + nx_base
-        Vx_arrival = np.zeros((nx_base, nx))
-        Vx_arrival[:, :nx_base] = np.eye(nx_base)
+        n_arrival = (
+            nx_base
+            if arrival_state_idx is None
+            else int(np.asarray(arrival_state_idx).size)
+        )
+        ny0 = n_residual + n_arrival
+        Vx_arrival = np.zeros((n_arrival, nx))
+        if arrival_state_idx is None:
+            Vx_arrival[:, :nx_base] = np.eye(nx_base)
+        else:
+            for i, si in enumerate(arrival_state_idx):
+                Vx_arrival[i, int(si)] = 1.0
         ocp.cost.cost_type_0 = "LINEAR_LS"
         ocp.cost.Vx_0 = np.vstack([Vx, Vx_arrival])
-        ocp.cost.Vu_0 = np.vstack([Vu, np.zeros((nx_base, Vu.shape[1]))])
+        ocp.cost.Vu_0 = np.vstack([Vu, np.zeros((n_arrival, Vu.shape[1]))])
         W0 = np.zeros((ny0, ny0))
         W0[:n_residual, :n_residual] = ocp.cost.W
-        W0[n_residual:, n_residual:] = np.linalg.inv(P_arrival)
+        P_arr = arrival_covariance_submatrix(P_arrival, arrival_state_idx)
+        W0[n_residual:, n_residual:] = invert_arrival_covariance(P_arr)
         ocp.cost.W_0 = W0
         ocp.cost.yref_0 = np.zeros(ny0)
         arrival_slice = slice(n_residual, ny0)
@@ -122,8 +136,11 @@ def build_conl_cost(
     n_residual: int,
     nx_base: int,
     P_arrival: np.ndarray | None,
+    arrival_state_idx: np.ndarray | None = None,
 ) -> tuple[slice | None, int, np.ndarray | None]:
     """Configure CONVEX_OVER_NONLINEAR path and terminal cost."""
+    from openmhe.mhe_strategies.arrival_cost import arrival_covariance_submatrix
+
     y_expr = ca.DM(Vx) @ model.x + ca.DM(Vu) @ model.u
     model.cost_y_expr = y_expr
 
@@ -135,11 +152,21 @@ def build_conl_cost(
     ocp.cost.yref = np.zeros(n_residual)
 
     if P_arrival is not None:
-        ny0 = n_residual + nx_base
+        n_arrival = (
+            nx_base
+            if arrival_state_idx is None
+            else int(np.asarray(arrival_state_idx).size)
+        )
+        ny0 = n_residual + n_arrival
         r0 = ca.SX.sym("r0_mhe", ny0)
-        model.cost_y_expr_0 = ca.vertcat(y_expr, model.x[:nx_base])
+        if arrival_state_idx is None:
+            x_arrival = model.x[:nx_base]
+        else:
+            x_arrival = ca.vertcat(*[model.x[int(si)] for si in arrival_state_idx])
+        model.cost_y_expr_0 = ca.vertcat(y_expr, x_arrival)
         model.cost_r_in_psi_expr_0 = r0
-        W_arr = np.linalg.inv(P_arrival)
+        P_arr = arrival_covariance_submatrix(P_arrival, arrival_state_idx)
+        W_arr = invert_arrival_covariance(P_arr)
         psi_arr = _quadratic_form(r0[n_residual:], W_arr)
         model.cost_psi_expr_0 = build_psi_expr(builder, r0[:n_residual]) + psi_arr
         ocp.cost.cost_type_0 = "CONVEX_OVER_NONLINEAR"
