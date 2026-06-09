@@ -1,6 +1,7 @@
 """Build and run Acados sliding-window MHE solvers from :class:`~openmhe.ObjectiveBuilder`."""
 
 import os
+import warnings
 from dataclasses import dataclass
 
 import casadi as ca
@@ -17,6 +18,7 @@ from openmhe.builder.cost import (
     build_linear_ls_cost,
     cost_mode_tag,
     needs_conl,
+    stack_weights,
     validate_term_penalties,
 )
 from openmhe.builder.input_regs import (
@@ -31,6 +33,71 @@ from openmhe.builder.input_regs import (
     validate_input_models,
     validate_input_partition,
 )
+
+
+def _c_array(name: str, data: np.ndarray) -> str:
+    """Format a row-major ``double`` initializer list for exported C arrays."""
+    flat = np.asarray(data, dtype=float).ravel(order="C")
+    lines = [f"const double {name}[{flat.size}] = {{"]
+    chunk = []
+    for i, val in enumerate(flat):
+        chunk.append(f"{val:.17g}")
+        if len(chunk) == 4 or i == flat.size - 1:
+            lines.append("    " + ", ".join(chunk) + ("," if i < flat.size - 1 else ""))
+            chunk = []
+    lines.append("};")
+    return "\n".join(lines)
+
+
+def _write_codegen_extra(
+    *,
+    linear_ls: bool,
+    nx: int,
+    nu_ocp: int,
+    ny_stage: int,
+    A_aug: np.ndarray,
+    B_aug: np.ndarray,
+    Vx: np.ndarray,
+    Vu: np.ndarray,
+    W: np.ndarray,
+) -> None:
+    """Emit constant LTI matrices for optional fast-path / validation tooling."""
+    codegen = get_codegen_dir()
+    header = codegen / "openmhe_mhe_extra.h"
+    source = codegen / "openmhe_mhe_extra.c"
+    ls_flag = 1 if linear_ls else 0
+    header.write_text(
+        f"""#ifndef OPENMHE_MHE_EXTRA_H_
+#define OPENMHE_MHE_EXTRA_H_
+
+#define OPENMHE_MHE_LINEAR_LS {ls_flag}
+#define OPENMHE_MHE_NY_STAGE {ny_stage}
+#define OPENMHE_MHE_NU_OCP {nu_ocp}
+
+extern const double OPENMHE_MHE_A[{nx * nx}];
+extern const double OPENMHE_MHE_B[{nx * nu_ocp}];
+extern const double OPENMHE_MHE_Vx[{ny_stage * nx}];
+extern const double OPENMHE_MHE_Vu[{ny_stage * nu_ocp}];
+extern const double OPENMHE_MHE_W[{ny_stage * ny_stage}];
+
+#endif
+""",
+        encoding="utf-8",
+    )
+    source.write_text(
+        "#include \"openmhe_mhe_extra.h\"\n\n"
+        + _c_array("OPENMHE_MHE_A", A_aug)
+        + "\n\n"
+        + _c_array("OPENMHE_MHE_B", B_aug)
+        + "\n\n"
+        + _c_array("OPENMHE_MHE_Vx", Vx)
+        + "\n\n"
+        + _c_array("OPENMHE_MHE_Vu", Vu)
+        + "\n\n"
+        + _c_array("OPENMHE_MHE_W", W)
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _configure_acados_codegen(ocp: AcadosOcp) -> None:
@@ -93,6 +160,27 @@ def _precompute_yrefs(builder, y, u, nx_base, nu, nw, n_steps):
             builder, y_2d[:, t_idx], u_2d[:, t_idx], nx_base, nu, nw
         )
     return yrefs
+
+
+def _lti_fast_enabled(
+    lti_linear_ls_fast: bool,
+    linear_ls: bool,
+    nlp_solver_type: str,
+    *,
+    stacklevel: int = 1,
+) -> bool:
+    """Return whether the LTI vector-only fast path may be used."""
+    if not (lti_linear_ls_fast and linear_ls):
+        return False
+    if nlp_solver_type != "SQP_RTI":
+        warnings.warn(
+            "lti_linear_ls_fast requires nlp_solver_type='SQP_RTI' "
+            f"(got {nlp_solver_type!r}); using the full acados solve instead.",
+            UserWarning,
+            stacklevel=stacklevel,
+        )
+        return False
+    return True
 
 
 def _configure_nlp_solver(
@@ -179,6 +267,7 @@ def build_mhe_solver(
     nlp_solver_type: str = "SQP_RTI",
     nlp_solver_max_iter: int | None = None,
     qp_solver: str = "PARTIAL_CONDENSING_HPIPM",
+    lti_linear_ls_fast: bool = True,
 ):
     """Build an Acados MHE solver from an objective.
 
@@ -303,6 +392,8 @@ def build_mhe_solver(
         dyn_parts.append(ca.vertcat(*sd_d1_next, *sd_d2_next))
 
     disc_dyn_expr = ca.vertcat(*dyn_parts) if len(dyn_parts) > 1 else dyn_parts[0]
+    A_aug = np.array(ca.DM(ca.jacobian(disc_dyn_expr, x)).full(), dtype=float)
+    B_aug = np.array(ca.DM(ca.jacobian(disc_dyn_expr, u)).full(), dtype=float)
 
     model = AcadosModel()
     model.name = "openmhe_mhe"
@@ -415,6 +506,19 @@ def build_mhe_solver(
         )
 
     mode = cost_mode_tag(builder)
+    linear_ls = mode == "ls"
+    if linear_ls:
+        _write_codegen_extra(
+            linear_ls=True,
+            nx=nx,
+            nu_ocp=nu_err,
+            ny_stage=n_residual,
+            A_aug=A_aug,
+            B_aug=B_aug,
+            Vx=Vx,
+            Vu=Vu,
+            W=stack_weights(builder),
+        )
     n_known = len(known_inputs)
     json_name = (
         f"mhe_{mode}_{nlp_solver_type.lower()}_nr{n_residual}_nx{nx}_nu{nu}"
@@ -449,6 +553,11 @@ def build_mhe_solver(
     )
     solver._dt = dt
     solver._system = mhe_system
+    solver._nlp_solver_type = nlp_solver_type
+    solver._linear_ls = linear_ls
+    solver._lti_linear_ls_fast = _lti_fast_enabled(
+        lti_linear_ls_fast, linear_ls, nlp_solver_type, stacklevel=2
+    )
     return solver
 
 

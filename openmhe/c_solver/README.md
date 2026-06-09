@@ -21,11 +21,22 @@ If you see a **dimension mismatch** (`status -3` / stale `libopenmhe_mhe_run.so`
 
 ## Profiling
 
-Per-window setup / solve / warm-start timings (stderr):
+Per-window setup / solve / warm-start timings (stderr), plus Acados
+`time_lin` / `time_qp_sol` / `time_reg` / `time_glob` averages:
 
 ```bash
 make -C openmhe/c_solver OPENMHE_PROFILE=1 ...
 ```
+
+### LTI + LINEAR_LS fast path
+
+When the solver is built with all-L2 penalties (`LINEAR_LS`), `run_c_solver(...,
+lti_linear_ls_fast=True)` (default) reuses condensed QP factors after the first
+window: dynamics Jacobians and stage Hessians are skipped, only QP vectors are
+refreshed. Disable with `lti_linear_ls_fast=False`. Requires
+`build_mhe_solver(..., lti_linear_ls_fast=True)` (default for `LINEAR_LS`) and
+`nlp_solver_type='SQP_RTI'`; otherwise a warning is emitted and the full solve is used.
+Constant `A`, `B`, `Vx`, `Vu`, `W` are exported to `c_generated_code/openmhe_mhe_extra.{h,c}`.
 
 ## Unit tests (filters, linear algebra)
 

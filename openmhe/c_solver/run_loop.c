@@ -3,6 +3,10 @@
 #include <string.h>
 
 #include "acados_c/ocp_nlp_interface.h"
+#include "acados/ocp_nlp/ocp_nlp_common.h"
+#include "acados/ocp_nlp/ocp_nlp_sqp_rti.h"
+
+#include "lti_fast.h"
 #include "profile.h"
 #include "run_loop.h"
 
@@ -250,6 +254,67 @@ static void set_stage0_yref(
     set_yref_stage(nlp_config, nlp_dims, nlp_in, 0, yref0);
 }
 
+static void openmhe_condense_qp_lhs(
+    ocp_nlp_config *config,
+    ocp_nlp_dims *dims,
+    ocp_nlp_opts *nlp_opts,
+    ocp_nlp_memory *nlp_mem,
+    ocp_nlp_workspace *nlp_work)
+{
+    ocp_qp_xcond_solver_config *qp_solver = config->qp_solver;
+    qp_solver->condense_lhs(
+        qp_solver, dims->qp_solver, nlp_mem->qp_in, nlp_mem->qp_out,
+        nlp_opts->qp_solver_opts, nlp_mem->qp_solver_mem, nlp_work->qp_work);
+}
+
+static void openmhe_profile_add_acados(
+    openmhe_profile_t *prof, ocp_nlp_solver *nlp_solver)
+{
+    ocp_nlp_config *config = nlp_solver->config;
+    ocp_nlp_sqp_rti_memory *rti_mem = nlp_solver->mem;
+    ocp_nlp_memory *nlp_mem = rti_mem->nlp_mem;
+    ocp_nlp_timings *timings = nlp_mem->nlp_timings;
+
+    prof->acados_lin += timings->time_lin;
+    prof->acados_qp += timings->time_qp_sol;
+    prof->acados_reg += timings->time_reg;
+    prof->acados_glob += timings->time_glob;
+    (void)config;
+}
+
+static int openmhe_mhe_solve_window(
+    openmhe_mhe_solver_capsule *capsule,
+    ocp_nlp_solver *nlp_solver,
+    const openmhe_run_config_t *cfg,
+    int window_idx,
+    int *lhs_valid,
+    int *use_fast)
+{
+    if (*use_fast && window_idx > 0
+        && (*lhs_valid || cfg->dynamic_arrival)) {
+        const int stage0_hess = cfg->dynamic_arrival;
+        const int status = openmhe_mhe_solve_lti_fast(
+            capsule, stage0_hess, lhs_valid);
+        if (status == 0) {
+            return 0;
+        }
+        *use_fast = 0;
+    }
+
+    const int status = openmhe_mhe_acados_solve(capsule);
+    if (status == 0 && *use_fast) {
+        ocp_nlp_sqp_rti_memory *rti_mem = nlp_solver->mem;
+        ocp_nlp_sqp_rti_opts *rti_opts = openmhe_mhe_acados_get_nlp_opts(capsule);
+        ocp_nlp_sqp_rti_workspace *rti_work = nlp_solver->work;
+        openmhe_condense_qp_lhs(
+            nlp_solver->config, nlp_solver->dims, rti_opts->nlp_opts,
+            rti_mem->nlp_mem, rti_work->nlp_work);
+        *lhs_valid = 1;
+    }
+    (void)window_idx;
+    return status;
+}
+
 int openmhe_mhe_run_sliding(
     openmhe_mhe_solver_capsule *capsule,
     const openmhe_run_config_t *cfg,
@@ -337,6 +402,12 @@ int openmhe_mhe_run_sliding(
     OPENMHE_PROF_DECL;
 
     int status = 0;
+    int lhs_valid = 0;
+    int use_fast = 0;
+    if (cfg->lti_linear_ls_fast && cfg->linear_ls
+        && openmhe_mhe_is_linear_ls_plan(capsule)) {
+        use_fast = 1;
+    }
 
     for (int idx = 0; idx < n_est; ++idx) {
         const int t_start = idx;
@@ -396,7 +467,9 @@ int openmhe_mhe_run_sliding(
         openmhe_profile_add(&prof.setup, &_omhe_ta, &_omhe_tb);
 
         OPENMHE_PROF_NOW(&_omhe_ta);
-        status = openmhe_mhe_acados_solve(capsule);
+        status = openmhe_mhe_solve_window(
+            capsule, nlp_solver, cfg, idx, &lhs_valid, &use_fast);
+        openmhe_profile_add_acados(&prof, nlp_solver);
         OPENMHE_PROF_NOW(&_omhe_tb);
         openmhe_profile_add(&prof.solve, &_omhe_ta, &_omhe_tb);
         if (status != 0) {

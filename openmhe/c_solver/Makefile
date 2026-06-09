@@ -32,7 +32,7 @@ LDFLAGS += -Wl,-rpath,$(CODEGEN_DIR) -Wl,-rpath,$(LIB_PATH)
 LDLIBS += -lacados_ocp_solver_openmhe_mhe -lacados -lhpipm -lblasfeo -lm
 
 RUN_LIB = libopenmhe_mhe_run.so
-RUN_OBJ = run_loop.o
+RUN_OBJ = run_loop.o lti_fast.o
 
 TEST_CFLAGS = $(CPPFLAGS) $(CFLAGS) -I.
 
@@ -44,8 +44,11 @@ codegen_lib:
 	@test -f $(CODEGEN_DIR)/libacados_ocp_solver_openmhe_mhe.so || \
 		$(MAKE) -C $(CODEGEN_DIR) ocp_shared_lib CFLAGS="$(CFLAGS)"
 
-run_loop.o: run_loop.c run_loop.h profile.h $(CODEGEN_HDR)
+run_loop.o: run_loop.c run_loop.h lti_fast.h profile.h $(CODEGEN_HDR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ run_loop.c
+
+lti_fast.o: lti_fast.c lti_fast.h run_loop.h $(CODEGEN_HDR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ lti_fast.c
 
 filter_arrival.o: filter_arrival.c filter_arrival.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ filter_arrival.c

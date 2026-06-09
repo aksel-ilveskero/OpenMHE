@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from openmhe.builder.input_regs import unmeasured_regulator_indices
-from openmhe.builder.solver import WindowStep, _precompute_yrefs
+from openmhe.builder.solver import WindowStep, _lti_fast_enabled, _precompute_yrefs
 from openmhe.frontend.acados_runtime import (
     acados_root,
     blasfeo_target_define,
@@ -48,6 +48,8 @@ class _RunConfig(ctypes.Structure):
         ("n_fd", ctypes.c_int),
         ("n_sd", ctypes.c_int),
         ("n_unmeasured", ctypes.c_int),
+        ("lti_linear_ls_fast", ctypes.c_int),
+        ("linear_ls", ctypes.c_int),
     ]
 
 
@@ -199,7 +201,15 @@ def _precompute_arrival(
     return x_bar_stage, W0_stage
 
 
-def run_c_solver(solver, y, u, post_steps=None, *, rebuild: bool = False):
+def run_c_solver(
+    solver,
+    y,
+    u,
+    post_steps=None,
+    *,
+    rebuild: bool = False,
+    lti_linear_ls_fast: bool | None = None,
+):
     """C implementation of :func:`~openmhe.run_solver` (same return values).
 
     ``post_steps`` are applied in Python after the C loop (same semantics as
@@ -330,6 +340,17 @@ def run_c_solver(solver, y, u, post_steps=None, *, rebuild: bool = False):
         n_fd=len(fd_idx),
         n_sd=len(sd_idx),
         n_unmeasured=len(unmeasured_ui),
+        lti_linear_ls_fast=int(
+            _lti_fast_enabled(
+                solver._lti_linear_ls_fast
+                if lti_linear_ls_fast is None
+                else lti_linear_ls_fast,
+                getattr(solver, "_linear_ls", solver._cost_mode == "ls"),
+                getattr(solver, "_nlp_solver_type", "SQP_RTI"),
+                stacklevel=2,
+            )
+        ),
+        linear_ls=int(getattr(solver, "_linear_ls", solver._cost_mode == "ls")),
     )
 
     u_meas = None

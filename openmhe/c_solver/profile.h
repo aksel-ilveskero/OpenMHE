@@ -7,6 +7,10 @@ typedef struct {
     double setup;
     double solve;
     double shift;
+    double acados_lin;
+    double acados_qp;
+    double acados_reg;
+    double acados_glob;
 } openmhe_profile_t;
 
 #define OPENMHE_PROF_DECL struct timespec _omhe_ta, _omhe_tb
@@ -32,6 +36,13 @@ static inline void openmhe_profile_report(
         tag, n_windows, p->setup * 1e3, p->solve * 1e3, p->shift * 1e3,
         p->setup / n_windows * 1e3, p->solve / n_windows * 1e3,
         p->shift / n_windows * 1e3);
+    if (n_windows > 0) {
+        fprintf(stderr,
+            "[openmhe %s] acados per-window lin=%.4f qp=%.4f reg=%.4f glob=%.4f ms\n",
+            tag,
+            p->acados_lin / n_windows * 1e3, p->acados_qp / n_windows * 1e3,
+            p->acados_reg / n_windows * 1e3, p->acados_glob / n_windows * 1e3);
+    }
 }
 
 #else /* OPENMHE_PROFILE */

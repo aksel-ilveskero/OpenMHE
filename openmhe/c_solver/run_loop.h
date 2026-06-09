@@ -38,6 +38,8 @@ typedef struct {
     int n_fd;
     int n_sd;
     int n_unmeasured;
+    int lti_linear_ls_fast;
+    int linear_ls;
 } openmhe_run_config_t;
 
 /** Allocate and set up the Acados NLP solver inside ``capsule``. */
