@@ -20,3 +20,7 @@ examples/mhe_results.png
 .idea/
 .vscode/
 *.swp
+
+# Compiled C / shared libraries
+*.o
+*.so
