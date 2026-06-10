@@ -2,10 +2,8 @@
  * LTI Kalman filters and arrival-weight utilities for the C MHE driver.
  *
  * Production use (``run_loop.c``):
- *   - ``OPENMHE_FILTER_EKF``: incremental arrival cost for ``EKFArrivalCost``.
+ *   - ``OPENMHE_FILTER_EKF`` / ``OPENMHE_FILTER_UKF``: incremental arrival cost.
  *   - ``openmhe_invert_arrival_covariance``: stage-0 weight block from filter ``P``.
- *
- * UKF symbols remain for unit tests; ``run_c_solver`` does not wire UKF yet.
  *
  * Matrix layout: all filter dynamics/noise matrices (``A``, ``B``, ``C``, ``D``,
  * ``Q``, ``R``, ``P``) are dense row-major.  Acados stage-0 ``W`` passed from
@@ -20,8 +18,8 @@ extern "C" {
 
 typedef enum {
     OPENMHE_FILTER_NONE = 0,
-    OPENMHE_FILTER_UKF = 1, /* unit tests only in production driver */
-    OPENMHE_FILTER_EKF = 2, /* used by run_c_solver for dynamic arrival */
+    OPENMHE_FILTER_UKF = 1,
+    OPENMHE_FILTER_EKF = 2,
 } openmhe_filter_kind_t;
 
 /**

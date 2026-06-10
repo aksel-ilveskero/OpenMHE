@@ -33,7 +33,7 @@ typedef struct {
     int n_arrival; /* plant arrival residual rows (<= nx_base) */
     int has_arrival;
     int arrival_off;     /* row offset of arrival block inside stage-0 ``yref`` */
-    int dynamic_arrival; /* 1 when stage-0 ``W`` changes each window (EKF path) */
+    int dynamic_arrival; /* 1 when stage-0 ``W`` changes each window (EKF/UKF) */
     int n_pin;
     int n_u_extract;
     int n_rw;
@@ -47,11 +47,10 @@ typedef struct {
 } openmhe_run_config_t;
 
 /**
- * Plant-side EKF matrices and stage-0 weight template for in-C arrival cost.
+ * Plant-side Kalman filter matrices and stage-0 weight template for in-C arrival cost.
  *
- * Passed from ``c_runner.run_c_solver`` when ``solver._filter_kind == "ekf"``.
- * ``NULL`` disables the live filter; legacy precomputed ``x_bar_pre`` /
- * ``W0_stage_pre`` buffers are unused in that case.
+ * Passed from ``c_runner.run_c_solver`` when ``solver._filter_kind`` is ``"ekf"``
+ * or ``"ukf"``.  ``NULL`` disables the live filter.
  *
  * ``y_meas`` (separate argument to ``openmhe_mhe_run_sliding``) must be
  * ``(n_steps, ny)`` row-major raw measurements for ``openmhe_filter_assimilate``.
@@ -71,6 +70,10 @@ typedef struct {
     const double *R;
     /** Fixed stage-0 weight from codegen; arrival block overwritten each window. */
     const double *W0_template;
+    /** UKF tuning (ignored for EKF).  Defaults match ``UKFArrivalCost`` in Python. */
+    double alpha;
+    double beta;
+    double kappa;
 } openmhe_arrival_filter_setup_t;
 
 /** Allocate and set up the Acados NLP solver inside ``capsule``. */
@@ -91,7 +94,7 @@ int openmhe_mhe_free_solver(openmhe_mhe_solver_capsule *capsule);
  * arrival, or NULL (legacy; unused when ``filter_setup`` is set).
  * ``y_meas``: ``(n_steps, ny)`` row-major raw measurements for the in-C filter,
  * or NULL when ``filter_setup`` is NULL.
- * ``filter_setup``: live EKF arrival configuration, or NULL.
+ * ``filter_setup``: live EKF/UKF arrival configuration, or NULL.
  */
 int openmhe_mhe_run_sliding(
     openmhe_mhe_solver_capsule *capsule,

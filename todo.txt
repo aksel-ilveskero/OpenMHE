@@ -54,7 +54,7 @@
 - Slew rates for states as well
 
 - Arrival costs
-    - UKF in run_c_solver (use run_solver for UKF until in-C UKF is fixed at scale)
+    - UKF with custom nonlinear f/h in run_c_solver (use run_solver)
 
 - Real-time performance (target: solve + overhead < dt, ~1 ms on ot_22)
     - Baseline (N=3 subsample): ~1.8 ms/window full RTI, ~1.34 ms/window fast path

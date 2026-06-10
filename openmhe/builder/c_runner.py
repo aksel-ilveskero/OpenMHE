@@ -69,15 +69,20 @@ class _FilterSetup(ctypes.Structure):
         ("Q", ctypes.c_void_p),
         ("R", ctypes.c_void_p),
         ("W0_template", ctypes.c_void_p),
+        ("alpha", ctypes.c_double),
+        ("beta", ctypes.c_double),
+        ("kappa", ctypes.c_double),
     ]
 
 
+_OPENMHE_FILTER_UKF = 1
 _OPENMHE_FILTER_EKF = 2
 
 
 def _build_filter_setup(solver, has_arrival: bool):
-    """Build ctypes filter setup for in-C EKF arrival, or ``None``."""
-    if not has_arrival or getattr(solver, "_filter_kind", None) != "ekf":
+    """Build ctypes filter setup for in-C EKF/UKF arrival, or ``None``."""
+    kind = getattr(solver, "_filter_kind", None)
+    if not has_arrival or kind not in ("ekf", "ukf"):
         return None
     w0_template = getattr(solver, "_W0_template_f", None)
     if w0_template is None and solver._W0_template is not None:
@@ -91,8 +96,13 @@ def _build_filter_setup(solver, has_arrival: bool):
             ctypes.c_void_p
         )
 
+    filter_kind = _OPENMHE_FILTER_EKF if kind == "ekf" else _OPENMHE_FILTER_UKF
+    alpha = getattr(solver, "_filter_alpha", 0.0) if kind == "ukf" else 0.0
+    beta = getattr(solver, "_filter_beta", 0.0) if kind == "ukf" else 0.0
+    kappa = getattr(solver, "_filter_kappa", 0.0) if kind == "ukf" else 0.0
+
     return _FilterSetup(
-        kind=_OPENMHE_FILTER_EKF,
+        kind=filter_kind,
         nx_base=int(solver._nx_base),
         ny=int(solver._system.ny),
         nu=int(solver._system.nu),
@@ -104,7 +114,11 @@ def _build_filter_setup(solver, has_arrival: bool):
         D=_ptr(solver._filter_D),
         Q=_ptr(solver._filter_Q),
         R=_ptr(solver._filter_R),
-        W0_template=_ptr(w0_template),
+        # Fortran-order buffer; do not pass through _ptr (would copy and GC the pointer).
+        W0_template=w0_template.ctypes.data_as(ctypes.c_void_p),
+        alpha=alpha,
+        beta=beta,
+        kappa=kappa,
     )
 
 
@@ -277,20 +291,23 @@ def run_c_solver(
     Raises
     ------
     TypeError
-        If the arrival cost is a UKFArrivalCost.
+        If ``UKFArrivalCost`` uses custom nonlinear ``f``/``h`` (C UKF is LTI-only).
     RuntimeError
         If the C MHE driver fails.
     """
 
-    
     from openmhe.mhe_strategies.arrival_cost import UKFArrivalCost
 
     arrival_cost = getattr(solver, "_arrival_cost", None)
     if isinstance(arrival_cost, UKFArrivalCost):
-        raise TypeError(
-            "run_c_solver does not support UKFArrivalCost yet; use EKFArrivalCost "
-            "or run_solver() for UKF."
-        )
+        if (
+            arrival_cost._f.__func__ is not UKFArrivalCost._default_f
+            or arrival_cost._h.__func__ is not UKFArrivalCost._default_h
+        ):
+            raise TypeError(
+                "run_c_solver UKFArrivalCost requires default LTI f/h; "
+                "pass custom f/h only with run_solver()."
+            )
 
     # Setup libraries, functions and types
     lib = _load_run_lib(rebuild=rebuild)
@@ -365,7 +382,7 @@ def run_c_solver(
     has_arrival = solver._arrival_slice is not None
     dynamic_arrival = (
         has_arrival
-        and getattr(solver, "_filter_kind", None) == "ekf"
+        and getattr(solver, "_filter_kind", None) in ("ekf", "ukf")
         and solver._W0_template is not None
     )
 

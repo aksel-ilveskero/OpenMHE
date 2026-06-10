@@ -13,8 +13,7 @@ c_generated_code/
 .openmhe/
 
 # Demo outputs
-mhe_results.png
-examples/mhe_results.png
+*.png
 
 # IDE
 .idea/

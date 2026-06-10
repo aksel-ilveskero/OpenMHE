@@ -467,33 +467,53 @@ int openmhe_mhe_run_sliding(
     }
 
     const int filter_live = filter_setup != NULL
-        && filter_setup->kind == OPENMHE_FILTER_EKF
+        && (filter_setup->kind == OPENMHE_FILTER_EKF
+            || filter_setup->kind == OPENMHE_FILTER_UKF)
         && cfg->dynamic_arrival;
 
+    const int ukf_filter = filter_live
+        && filter_setup->kind == OPENMHE_FILTER_UKF;
+    const int ny_f = filter_setup != NULL ? filter_setup->ny : 1;
+    const int n_ukf_chi = ukf_filter ? (2 * nx_base + 1) * nx_base : 1;
+    const int n_ukf_gamma = ukf_filter ? (2 * nx_base + 1) * ny_f : 1;
+
     /*
-     * Incremental EKF for dynamic arrival cost (replaces Python pre-pass).
+     * Incremental EKF/UKF for dynamic arrival cost (replaces Python pre-pass).
      * Stack buffers scale with plant nx_base (not augmented nx).
      */
     openmhe_filter_state_t filter_st;
     openmhe_filter_config_t filter_cfg;
     double filter_x[nx_base];
     double filter_P[nx_base * nx_base];
+    double ukf_chi[n_ukf_chi];
+    double ukf_chi_pred[n_ukf_chi];
+    double ukf_gamma[n_ukf_gamma];
+    openmhe_ukf_workspace_t ukf_ws;
 
     if (filter_live) {
-        filter_cfg.kind = OPENMHE_FILTER_EKF;
+        filter_cfg.kind = filter_setup->kind;
         filter_cfg.nx = filter_setup->nx_base;
         filter_cfg.ny = filter_setup->ny;
         filter_cfg.nu = filter_setup->nu;
-        filter_cfg.alpha = 0.0;
-        filter_cfg.beta = 0.0;
-        filter_cfg.kappa = 0.0;
+        filter_cfg.alpha = filter_setup->alpha;
+        filter_cfg.beta = filter_setup->beta;
+        filter_cfg.kappa = filter_setup->kappa;
         filter_cfg.A = filter_setup->A;
         filter_cfg.B = filter_setup->B;
         filter_cfg.C = filter_setup->C;
         filter_cfg.D = filter_setup->D;
         filter_cfg.Q = filter_setup->Q;
         filter_cfg.R = filter_setup->R;
-        openmhe_filter_init(&filter_st, &filter_cfg, filter_x, filter_P, NULL);
+        if (ukf_filter) {
+            ukf_ws.chi = ukf_chi;
+            ukf_ws.chi_pred = ukf_chi_pred;
+            ukf_ws.gamma_pred = ukf_gamma;
+            openmhe_filter_init(
+                &filter_st, &filter_cfg, filter_x, filter_P, &ukf_ws);
+        } else {
+            openmhe_filter_init(
+                &filter_st, &filter_cfg, filter_x, filter_P, NULL);
+        }
     }
 
     for (int idx = 0; idx < n_est; ++idx) {

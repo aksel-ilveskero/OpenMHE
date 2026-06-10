@@ -239,7 +239,7 @@ static void ekf_update(
 }
 
 /* -------------------------------------------------------------------------- */
-/* UKF (unit tests; not used in production run_c_solver path)                 */
+/* UKF (LTI sigma-point filter; same timing contract as EKF in run_loop.c)       */
 /* -------------------------------------------------------------------------- */
 
 static void ukf_sigma_points(

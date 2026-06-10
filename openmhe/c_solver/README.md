@@ -92,16 +92,20 @@ Window k>0 (fast):  openmhe_mhe_solve_lti_fast  →  vectors only  →  solve_qp
 
 On QP failure or a bad status, `use_fast` is cleared and remaining windows fall back to the full solve.
 
-### Dynamic EKF arrival
+### Dynamic EKF/UKF arrival
 
-When `EKFArrivalCost` supplies a time-varying stage-0 weight `W0`, the C driver
-runs an incremental EKF each window (`filter_prior` → invert arrival block →
-set stage-0 `yref`/`W` → solve → `filter_assimilate`).  Null-space directions in
-`P` (strict kinematics / sparse process noise) are zeroed in the weight, matching
-Python `invert_arrival_covariance`.  Each window refreshes the stage-0 Hessian
+When `EKFArrivalCost` or `UKFArrivalCost` (LTI plant only) supplies a
+time-varying stage-0 weight `W0`, the C driver runs an incremental filter each
+window (`filter_prior` → invert arrival block → set stage-0 `yref`/`W` → solve
+→ `filter_assimilate`).  Null-space directions in `P` (strict kinematics /
+sparse process noise) are zeroed in the weight, matching Python
+`invert_arrival_covariance`.  Each window refreshes the stage-0 Hessian
 (`stage0_full_hess=1`).  The condensed LHS is invalidated for that window but
 rebuilt on the next full solve.  Fast steps between windows still skip stages
 `1…N` Hessians.
+
+Custom nonlinear `f`/`h` on `UKFArrivalCost` are not supported in C; use
+`run_solver()` for those cases.
 
 ### Codegen export (`openmhe_mhe_extra.{h,c}`)
 
@@ -144,11 +148,9 @@ All shooting stages share the same `nx` and `nu` (standard for our MHE models), 
 
 `openmhe.run_c_solver(solver, y, u, post_steps=...)` builds the library if needed and runs the C sliding-window loop. Each call allocates an Acados capsule, runs `openmhe_mhe_init_solver` → `openmhe_mhe_run_sliding` → `openmhe_mhe_free_solver`. Signature and return values match `run_solver` (`u_hat`, `x_hat` with shape `(nu, n_est)` and `(nx_base, n_est)`).
 
-Dynamic arrival (`EKFArrivalCost`) is computed in the C sliding loop via an
-incremental EKF; stage cost weights `W` (except the stage-0 arrival block) are
-fixed at codegen time — change `lambda_u` or noise covariances, then call
-`build_mhe_solver` again.
-
-Use `run_solver()` for `UKFArrivalCost` until in-C UKF support is restored.
+Dynamic arrival (`EKFArrivalCost`, `UKFArrivalCost`) is computed in the C sliding
+loop via an incremental filter; stage cost weights `W` (except the stage-0
+arrival block) are fixed at codegen time — change `lambda_u` or noise
+covariances, then call `build_mhe_solver` again.
 
 Optional: `post_steps` run in Python after the C loop (same `WindowStep` semantics as `run_solver`).
