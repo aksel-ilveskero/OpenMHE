@@ -1,4 +1,4 @@
-import time
+import os
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -411,6 +411,14 @@ if __name__ == "__main__":
         y=1.002,
     )
     fig.tight_layout()
-    plt.show()
+
+    backend = plt.get_backend().lower()
+    if backend.startswith("agg"):
+        # Non-interactive backend, save to file
+        out_path = os.path.join(os.path.dirname(__file__), "mhe_estimates.png")
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        print(f"Saved figure to: {out_path}")
+    else:
+        plt.show()
 
     

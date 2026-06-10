@@ -611,6 +611,11 @@ def build_mhe_solver(
     solver._cost_mode = mode
     solver._arrival_cost = arrival_cost
     solver._W0_template = W0_template
+    solver._W0_template_f = (
+        np.asfortranarray(W0_template, dtype=np.float64)
+        if W0_template is not None
+        else None
+    )
     solver._arrival_state_idx = arrival_state_idx
     solver._n_arrival = n_arrival
     solver._arrival_W_slice = (

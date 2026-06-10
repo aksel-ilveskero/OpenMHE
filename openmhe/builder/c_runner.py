@@ -79,9 +79,12 @@ def _build_filter_setup(solver, has_arrival: bool):
     """Build ctypes filter setup for in-C EKF arrival, or ``None``."""
     if not has_arrival or getattr(solver, "_filter_kind", None) != "ekf":
         return None
-    if solver._W0_template is None:
+    w0_template = getattr(solver, "_W0_template_f", None)
+    if w0_template is None and solver._W0_template is not None:
+        w0_template = np.asfortranarray(solver._W0_template, dtype=np.float64)
+        solver._W0_template_f = w0_template
+    if w0_template is None:
         return None
-    W0_template = np.asfortranarray(solver._W0_template, dtype=np.float64)
 
     def _ptr(arr):
         return np.ascontiguousarray(arr, dtype=np.float64).ctypes.data_as(
@@ -101,7 +104,7 @@ def _build_filter_setup(solver, has_arrival: bool):
         D=_ptr(solver._filter_D),
         Q=_ptr(solver._filter_Q),
         R=_ptr(solver._filter_R),
-        W0_template=_ptr(W0_template),
+        W0_template=_ptr(w0_template),
     )
 
 
