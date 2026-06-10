@@ -29,6 +29,57 @@ def test_full_partition_known_and_rw():
     mhe.build_mhe_solver(_system(), 10, obj, dt=0.01, already_discrete=True)
 
 
+def test_full_partition_known_and_unknown():
+    """Valid partition (known + free unknown input) builds without error."""
+    pytest.importorskip("acados_template")
+    obj = _base(ny=1, nx=2)
+    obj.add(mhe.KnownInput([0]))
+    obj.add(mhe.UnknownInput([1]))
+    s = mhe.build_mhe_solver(_system(), 10, obj, dt=0.01, already_discrete=True)
+    assert s._unknown_inputs == [1]
+
+
+def test_unknown_input_runs_solver():
+    """UnknownInput stays in the OCP control vector and produces finite estimates."""
+    pytest.importorskip("acados_template")
+    A = np.array([[0.9]])
+    B = np.array([[0.1, 0.05]])
+    C = np.array([[1.0]])
+    system = mhe.SystemModel.from_matrices(A, B, C, None, is_discrete=True, dt=0.01)
+    obj = _base(ny=1, nx=1)
+    obj.add(mhe.KnownInput([0]))
+    obj.add(mhe.UnknownInput([1]))
+    s = mhe.build_mhe_solver(system, 5, obj, dt=0.01, already_discrete=True)
+    n = 30
+    u1_true = np.linspace(0.0, 1.0, n)
+    u0 = np.zeros(n)
+    x = np.zeros(n)
+    for k in range(1, n):
+        x[k] = A[0, 0] * x[k - 1] + B[0, 0] * u0[k - 1] + B[0, 1] * u1_true[k - 1]
+    y = x.reshape(1, -1) + np.random.default_rng(0).normal(0, 0.01, (1, n))
+    u = np.vstack([u0, np.zeros(n)])
+    uh, _ = mhe.run_solver(s, y, u)
+    assert uh.shape == (2, n - 5)
+    assert np.all(np.isfinite(uh[1]))
+
+
+def test_overlap_unknown_and_rw_raises():
+    """Same index cannot be both UnknownInput and regulated."""
+    pytest.importorskip("acados_template")
+    obj = _base(ny=1, nx=1)
+    obj.add(mhe.KnownInput([0]))
+    obj.add(mhe.UnknownInput([1]))
+    obj.add(mhe.InputRandomWalk([1], lambda_u=1.0))
+    with pytest.raises(ValueError, match="UnknownInput and regulated"):
+        mhe.build_mhe_solver(
+            _scalar_system(),
+            10,
+            obj,
+            dt=0.01,
+            already_discrete=True,
+        )
+
+
 def _scalar_system():
     return mhe.SystemModel.from_matrices(
         np.array([[0.9]]),

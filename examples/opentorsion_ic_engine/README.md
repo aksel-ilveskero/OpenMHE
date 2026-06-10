@@ -34,9 +34,9 @@ The setup cell adds this folder to `sys.path` so `from ice_data import load_pres
 
 - **States** — minimal-coordinate shaft torques and speeds (21 plant states)
 - **Known inputs** — six piston torques (`KnownInput` on channels 0–5)
-- **Unknown input** — propeller load (`InputRandomWalk` on channel 6)
+- **Unknown input** — propeller load (`InputRandomWalk` on channel 6 with `lambda_u`)
 - **Measurements** — two angular speeds (pulley and flywheel)
-- **Solver** — `run_c_solver` with `EKFArrivalCost`
+- **Solver** — `run_c_solver` with `EKFArrivalCost` (incremental filter in C; matches `run_solver`)
 
 Zero the load column in `u` passed to the estimator (`u_mhe[:, 6] = 0`); keep the simulated load only for plotting ground truth.
 

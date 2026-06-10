@@ -17,7 +17,7 @@ def cost_terms(builder: ObjectiveBuilder) -> list:
     return [
         t
         for t in builder.terms
-        if term_kind(t) not in ("INPUT_RANDOM_WALK", "KNOWN_INPUT")
+        if term_kind(t) not in ("INPUT_RANDOM_WALK", "KNOWN_INPUT", "UNKNOWN_INPUT")
     ]
 
 
@@ -82,6 +82,22 @@ def regulated_indices(
     return set(rw_indices) | set(fd_indices) | set(sd_indices)
 
 
+def collect_unknown_indices(builder: ObjectiveBuilder) -> list[int]:
+    """Sorted unique input indices declared as :class:`~openmhe.UnknownInput`."""
+    out: list[int] = []
+    for term in builder.terms:
+        if term_kind(term) == "UNKNOWN_INPUT":
+            out.extend(int(i) for i in term.target_idx)
+    if len(out) != len(set(out)):
+        raise ValueError("Duplicate input index in UnknownInput.")
+    return sorted(set(out))
+
+
+def unknown_input_terms(builder: ObjectiveBuilder) -> list:
+    """All :class:`~openmhe.UnknownInput` terms."""
+    return [t for t in builder.terms if term_kind(t) == "UNKNOWN_INPUT"]
+
+
 def validate_input_partition(
     builder: ObjectiveBuilder,
     nu: int,
@@ -92,9 +108,10 @@ def validate_input_partition(
     """Ensure each column of ``B`` (input index ``0 .. nu-1``) has exactly one role.
 
     Roles are mutually exclusive: regulated (RW / FD / SD), :class:`KnownInput`,
-    or :class:`InputTrackingTerm`.
+    :class:`UnknownInput`, or :class:`InputTrackingTerm`.
     """
     known = set(collect_known_indices(builder))
+    unknown = set(collect_unknown_indices(builder))
     tracked = set(collect_tracked_indices(builder))
     regulated = regulated_indices(rw_indices, fd_indices, sd_indices)
 
@@ -103,9 +120,24 @@ def validate_input_partition(
             f"Input index {sorted(known & regulated)} cannot be both KnownInput "
             "and regulated (RW/FD/SD)."
         )
+    if known & unknown:
+        raise ValueError(
+            f"Input index {sorted(known & unknown)} cannot be both KnownInput "
+            "and UnknownInput."
+        )
+    if unknown & regulated:
+        raise ValueError(
+            f"Input index {sorted(unknown & regulated)} cannot be both "
+            "UnknownInput and regulated (RW/FD/SD)."
+        )
     if known & tracked:
         raise ValueError(
             f"Input index {sorted(known & tracked)} cannot be both KnownInput "
+            "and InputTrackingTerm."
+        )
+    if unknown & tracked:
+        raise ValueError(
+            f"Input index {sorted(unknown & tracked)} cannot be both UnknownInput "
             "and InputTrackingTerm."
         )
     if tracked & regulated:
@@ -114,13 +146,13 @@ def validate_input_partition(
             "InputTrackingTerm and regulated (RW/FD/SD)."
         )
 
-    assigned = regulated | known | tracked
+    assigned = regulated | known | unknown | tracked
     expected = set(range(nu))
     missing = expected - assigned
     if missing:
         raise ValueError(
             f"Each input 0..{nu - 1} (B has {nu} columns) must be modeled exactly "
-            f"once as regulated, KnownInput, or InputTrackingTerm. "
+            f"once as regulated, KnownInput, UnknownInput, or InputTrackingTerm. "
             f"Unassigned: {sorted(missing)}."
         )
     extra = assigned - expected
@@ -207,6 +239,18 @@ def unmeasured_regulator_indices(
     return regulated_indices(rw_indices, fd_indices, sd_indices) - pinned
 
 
+def unmeasured_input_indices(
+    builder: ObjectiveBuilder,
+    rw_indices: list[int],
+    fd_indices: list[int],
+    sd_indices: list[int],
+) -> set[int]:
+    """Input indices with no measured ``u`` reference (RW/FD/SD + UnknownInput)."""
+    return unmeasured_regulator_indices(
+        builder, rw_indices, fd_indices, sd_indices
+    ) | set(collect_unknown_indices(builder))
+
+
 def seed_reg_state_prior(
     x_prior: np.ndarray,
     *,
@@ -217,6 +261,7 @@ def seed_reg_state_prior(
     rw_indices: list[int],
     fd_indices: list[int],
     sd_indices: list[int],
+    unknown_indices: list[int],
     u_hat: np.ndarray,
     window_idx: int,
     unmeasured: set[int],
@@ -264,6 +309,9 @@ def seed_reg_state_prior(
         x_prior[sd1_col[ui]] = _u_value(ui, 1)
         x_prior[sd2_col[ui]] = _u_value(ui, 2)
         u_at_lag1[ui] = x_prior[sd1_col[ui]]
+
+    for ui in unknown_indices:
+        u_at_lag1[ui] = _u_value(ui, 1)
 
     return u_at_lag1
 

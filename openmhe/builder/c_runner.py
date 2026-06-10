@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from openmhe.builder.input_regs import unmeasured_regulator_indices
+from openmhe.builder.input_regs import unmeasured_input_indices
 from openmhe.builder.solver import WindowStep, _lti_fast_enabled, _precompute_yrefs
 from openmhe.frontend.acados_runtime import (
     acados_root,
@@ -404,7 +404,7 @@ def run_c_solver(
     sd_idx, sd1_col = _index_array(solver._col_sd1)
     _, sd2_col = _index_array(solver._col_sd2)
     unmeasured = sorted(
-        unmeasured_regulator_indices(
+        unmeasured_input_indices(
             builder, solver._rw_indices, solver._fd_indices, solver._sd_indices
         )
     )

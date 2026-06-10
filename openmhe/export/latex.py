@@ -402,6 +402,8 @@ def _constrained_latex(
             defect_constraints.append(f"{dvar} = {rhs}")
         elif kind == "KNOWN_INPUT":
             pass
+        elif kind == "UNKNOWN_INPUT":
+            pass
         else:
             raise ValueError(f"Cannot render unknown term type: {kind!r}")
 

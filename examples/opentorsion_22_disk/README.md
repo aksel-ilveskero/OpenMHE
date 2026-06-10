@@ -5,7 +5,7 @@ MHE on a larger OpenTorsion assembly using **recorded test-bench data** (`data/t
 - **Input 0** — motor torque (measured or estimated depending on sensor config)
 - **Input 1** — propeller / load torque (`InputRandomWalk`)
 - **Sensors** — configurable subset of motor input, shaft torque, and velocities (default: `torque1` + `velocity2`)
-- **Arrival cost** — `EKFArrivalCost`
+- **Arrival cost** — `EKFArrivalCost` (computed incrementally in the C driver)
 - **Solver** — `run_c_solver`
 
 ## Run

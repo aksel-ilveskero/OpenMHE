@@ -19,6 +19,7 @@ from .penalties import (
     InputSecondDiffReg,
     InputTrackingTerm,
     KnownInput,
+    UnknownInput,
     L1Penalty,
     L2Penalty,
     MeasurementTerm,
@@ -52,4 +53,5 @@ __all__ = [
     "InputRegTerm",
     "InputTrackingTerm",
     "KnownInput",
+    "UnknownInput",
 ]

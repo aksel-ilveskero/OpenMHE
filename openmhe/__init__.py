@@ -2,8 +2,9 @@
 
 Build a sliding-window MHE from LTI dynamics and composable cost terms
 (measurement, process noise, known inputs, input regularization). Unknown
-inputs can be modeled with :class:`~openmhe.InputRandomWalk` or input regulators
-(:class:`~openmhe.InputFirstDiffReg`, :class:`~openmhe.InputSecondDiffReg`).
+inputs can be modeled with :class:`~openmhe.InputRandomWalk`, input regulators
+(:class:`~openmhe.InputFirstDiffReg`, :class:`~openmhe.InputSecondDiffReg`), or
+:class:`~openmhe.UnknownInput` (free OCP control, no penalty).
 
 Example
 -------
@@ -31,6 +32,7 @@ from .mhe_strategies import (
     InputSecondDiffReg,
     InputTrackingTerm,
     KnownInput,
+    UnknownInput,
     SteadyStateArrivalCost,
     UKFArrivalCost,
     noise_covs_from_builder,
@@ -85,6 +87,7 @@ __all__ = [
     "InputRegTerm",
     "InputTrackingTerm",
     "KnownInput",
+    "UnknownInput",
     "knownInput",
     "weight_from_lambda_u",
     "objective_to_latex",

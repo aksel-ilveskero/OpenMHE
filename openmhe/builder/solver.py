@@ -32,13 +32,14 @@ from openmhe.builder.input_regs import (
     collect_fd_indices,
     collect_rw_indices,
     collect_sd_indices,
+    collect_unknown_indices,
     cost_terms,
     merge_process_weight,
     plant_arrival_state_indices,
     sparse_process_noise_config,
     seed_reg_state_prior,
     term_kind,
-    unmeasured_regulator_indices,
+    unmeasured_input_indices,
     validate_input_models,
     validate_input_partition,
 )
@@ -157,7 +158,7 @@ def _build_yref_stack(builder, y_meas, u_known, nx_base, nu, nw):
             parts.append(ref)
         elif kind == "INPUT_REG":
             parts.append(np.zeros(len(term.target_idx)))
-        elif kind in ("INPUT_RANDOM_WALK", "KNOWN_INPUT"):
+        elif kind in ("INPUT_RANDOM_WALK", "KNOWN_INPUT", "UNKNOWN_INPUT"):
             continue
         else:
             raise ValueError(f"Unsupported term type: {kind}")
@@ -295,11 +296,14 @@ def build_mhe_solver(
     Uses ``LINEAR_LS`` when every term has :class:`~openmhe.L2Penalty`; otherwise
     ``CONVEX_OVER_NONLINEAR`` for L1, Huber, or dead-zone penalties.
 
-    Unknown inputs can be modeled with :class:`~openmhe.InputRandomWalk` (preferred)
-    or the legacy ``input_as_state`` keyword.
+    Unknown inputs can be modeled with :class:`~openmhe.InputRandomWalk` (smooth
+    random walk), :class:`~openmhe.InputFirstDiffReg` / :class:`~openmhe.InputSecondDiffReg`
+    (trend penalties), or :class:`~openmhe.UnknownInput` (no input penalty; free
+    OCP control).
 
     Each column of ``B`` must be assigned exactly once via regulated terms
-    (RW/FD/SD), :class:`~openmhe.KnownInput`, or :class:`~openmhe.InputTrackingTerm`.
+    (RW/FD/SD), :class:`~openmhe.KnownInput`, :class:`~openmhe.UnknownInput`, or
+    :class:`~openmhe.InputTrackingTerm`.
 
     Arrival cost at the first stage of each window can be supplied either as a
     fixed matrix ``P_arrival`` or via ``builder.arrival_cost``
@@ -352,6 +356,7 @@ def build_mhe_solver(
     known_inputs = validate_input_partition(
         builder, nu, rw_indices, fd_indices, sd_indices
     )
+    unknown_inputs = collect_unknown_indices(builder)
 
     n_rw = len(rw_indices)
     n_fd = len(fd_indices)
@@ -482,9 +487,15 @@ def build_mhe_solver(
                     raise ValueError(
                         f"Cannot track input {ui}; it is declared as KnownInput."
                     )
+                if ui in unknown_inputs:
+                    raise ValueError(
+                        f"Cannot track input {ui}; it is declared as UnknownInput."
+                    )
                 Vu[row + i, controlled_idx.index(ui)] = 1.0
             row += len(idx)
         elif kind == "KNOWN_INPUT":
+            continue
+        elif kind == "UNKNOWN_INPUT":
             continue
         elif kind == "INPUT_REG":
             trend = str(term.trend).upper()
@@ -608,6 +619,7 @@ def build_mhe_solver(
     solver._controlled_idx = controlled_idx
     solver._controlled_map = {ui: i for i, ui in enumerate(controlled_idx)}
     solver._known_inputs = known_inputs
+    solver._unknown_inputs = unknown_inputs
     solver._pin_u_idx = pin_u_idx
     solver._cost_mode = mode
     solver._arrival_cost = arrival_cost
@@ -699,7 +711,7 @@ def run_solver(solver, y, u, post_steps=None):
     controlled_map = getattr(solver, "_controlled_map", None)
     if controlled_map is None:
         controlled_map = {ui: i for i, ui in enumerate(controlled_idx)}
-    unmeasured = unmeasured_regulator_indices(
+    unmeasured = unmeasured_input_indices(
         builder, solver._rw_indices, solver._fd_indices, solver._sd_indices
     )
 
@@ -747,6 +759,7 @@ def run_solver(solver, y, u, post_steps=None):
             rw_indices=solver._rw_indices,
             fd_indices=solver._fd_indices,
             sd_indices=solver._sd_indices,
+            unknown_indices=solver._unknown_inputs,
             u_hat=_u_hat_raw,
             window_idx=idx,
             unmeasured=unmeasured,

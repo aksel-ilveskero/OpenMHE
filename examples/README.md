@@ -55,8 +55,8 @@ jupyter notebook examples/opentorsion_ic_engine/ice_estimation.ipynb
 
 | API | When to use |
 |-----|-------------|
-| `mhe.run_solver(solver, y, u)` | Pure Python Acados loop; supports `UKFArrivalCost` and per-window `cost_set` updates |
-| `mhe.run_c_solver(solver, y, u)` | Fast C driver (`openmhe/c_solver`); EKF arrival precomputed in Python; same return layout as `run_solver` |
+| `mhe.run_solver(solver, y, u)` | Pure Python Acados loop; custom nonlinear `f`/`h` on `UKFArrivalCost`; per-window `cost_set` updates |
+| `mhe.run_c_solver(solver, y, u)` | Fast C driver (`openmhe/c_solver`); in-C incremental EKF/UKF arrival; `UnknownInput` and `KnownInput`; same return layout as `run_solver` |
 
 Both expect `y` and `u` as `(channels, samples)`. Simulation arrays are usually `(samples, channels)` — transpose before calling.
 

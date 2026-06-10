@@ -6,8 +6,8 @@ Moving horizon estimation (MHE) on [Acados](https://docs.acados.org/) with compo
 
 - **Composable objectives** — stack `MeasurementTerm`, `ProcessTerm`, `KnownInput`, `InputTrackingTerm`, and regulators in an `ObjectiveBuilder`
 - **Robust penalties** — L2 (fast `LINEAR_LS`), L1, Huber, and dead-zone ( `CONVEX_OVER_NONLINEAR` )
-- **Unknown inputs** — model loads or biases as random-walk augmented states (`InputRandomWalk`)
-- **Sliding windows** — `run_solver` (Python) or `run_c_solver` (compiled C loop) with optional arrival cost and regulator state seeding
+- **Unknown inputs** — `InputRandomWalk` (smooth augmented state), input regulators (FD/SD), or `UnknownInput` (free OCP control, no penalty)
+- **Dynamic arrival cost** — `EKFArrivalCost` / `UKFArrivalCost` with time-varying stage-0 weights; computed incrementally in the C driver (and in Python via `run_solver`)
 - **LTI fast solve** — for all-L2 linear problems, `run_c_solver` reuses condensed QP factors after the first window (~25% faster RTI on shaft-line demos; requires `SQP_RTI`)
 - **LaTeX export** — paper-ready objective in substituted or constrained (`minimize … subject to`) form
 
@@ -90,7 +90,7 @@ u_hat, x_hat = mhe.run_c_solver(
 )
 ```
 
-Same outputs as `run_solver`. EKF arrival is precomputed in Python; the C loop applies Acados solves. Rebuild after horizon or dimension changes (`rebuild=True` or `make -C openmhe/c_solver clean all`).
+Same outputs as `run_solver`. Dynamic `EKFArrivalCost` and LTI `UKFArrivalCost` run an incremental filter inside the C loop (no Python pre-pass). Rebuild after horizon or dimension changes (`rebuild=True` or `make -C openmhe/c_solver clean all`). Restart the Jupyter kernel if ctypes keeps a stale `.so` after codegen changes.
 
 **LTI fast path** (default when every term uses `L2Penalty`):
 
@@ -116,9 +116,9 @@ solver = mhe.build_mhe_solver(model, 50, obj, dt=0.001)
 |-------|----------|
 | `SteadyStateArrivalCost` | Fixed DARE covariance; `x̄ = 0` |
 | `EKFArrivalCost` | Discrete Kalman filter on base states; time-varying `P` and `x̄` |
-| `UKFArrivalCost` | Unscented filter (LTI-compatible; optional nonlinear `f`/`h`) |
+| `UKFArrivalCost` | Unscented filter (LTI-compatible; optional nonlinear `f`/`h` in Python only) |
 
-Alternatively pass a fixed matrix with `P_arrival=`. Dynamic arrival costs (`EKF`, `UKF`) require all-L2 penalties (`LINEAR_LS` mode). `run_solver` updates stage-0 weights each window when `P` changes.
+Alternatively pass a fixed matrix with `P_arrival=`. Dynamic arrival costs (`EKF`, `UKF`) require all-L2 penalties (`LINEAR_LS` mode). Both `run_solver` and `run_c_solver` update stage-0 weights each window when `P` changes. In C, `UKFArrivalCost` requires default LTI `f`/`h`; custom nonlinear dynamics need `run_solver`.
 
 ### Input partition rule
 
@@ -126,11 +126,12 @@ Every column of `B` (each input index `0 … nu-1`) must be assigned **exactly o
 
 | Role | API | Notes |
 |------|-----|--------|
-| Known | `KnownInput([i])` | Pinned to `u` passed to `run_solver` (equality bounds) |
+| Known | `KnownInput([i])` | Pinned to `u` passed to `run_solver` / `run_c_solver` (equality bounds) |
 | Soft known | `InputTrackingTerm([i], …)` | Penalize deviation from reference (`"measured"`, `"zero"`, or scalar) |
 | Unknown / regulated | `InputRandomWalk`, `InputFirstDiffReg`, `InputSecondDiffReg` | Augmented states and/or smoothness priors |
+| Unknown / free | `UnknownInput([i])` | OCP control with **no** cost term; optimizer chooses `u` from dynamics + measurements only |
 
-Typical shaft line: `KnownInput([0])` or strong `InputTrackingTerm` on motor; `InputRandomWalk([1])` on load.
+Typical shaft line: `KnownInput([0])` or strong `InputTrackingTerm` on motor; `InputRandomWalk([1])` on load for a smooth estimate, or `UnknownInput([1])` when you want no increment penalty.
 
 **NoiseWeight:** `cov` is variance; stored weight is `1/cov` (smaller `cov` → stronger penalty). `1e-8` is very strong tracking, not “no penalty”.
 
@@ -194,6 +195,8 @@ pip install pytest
 pytest tests/ -q
 ```
 
+Parity and partition coverage: `tests/test_c_runner_parity.py` (C vs Python, EKF/UKF arrival), `tests/test_input_partition.py` (`UnknownInput`, overlap rules).
+
 ## Project layout
 
 | Path | Purpose |
@@ -232,11 +235,11 @@ Add `mhe_json/`, `c_generated_code/`, and local `*.png` to `.gitignore` before p
 | `MeasurementTerm` | Weighted LS: measurements vs `C x + D u` |
 | `ProcessTerm` | Penalty on process noise `w` in `x_{k+1} = A x_k + B u_k + w_k` |
 | `KnownInput` | Known input fixed from `u` in `run_solver` (no cost row) |
+| `UnknownInput` | Unknown input as OCP control; no penalty (free `u` each stage) |
 | `InputTrackingTerm` | Soft tracking (`reference="measured"`, `"zero"`, or scalar) |
-| `InputRandomWalk` | Unknown input as extra state; inferred from `y` and model |
+| `InputRandomWalk` | Unknown input as augmented state; `lambda_u` weights increment noise |
 | `InputFirstDiffReg` | Penalize `u_k - u_{k-1}` (`lambda_u` on regulator residual) |
 | `InputSecondDiffReg` | Penalize `u_k - 2 u_{k-1} + u_{k-2}` on controlled inputs |
-| `InputRandomWalk` | Unknown input as augmented state; `lambda_u` weights increment noise `w_u` in `ProcessTerm` |
 | `InputRegTerm` | Deprecated; use `InputFirstDiffReg` / `InputSecondDiffReg` |
 | `input_as_state` kwarg | Legacy random-walk indices (prefer `InputRandomWalk`) |
 

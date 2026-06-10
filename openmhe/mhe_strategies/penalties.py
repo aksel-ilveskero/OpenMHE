@@ -365,6 +365,23 @@ class KnownInput:
         self.target_type = "KNOWN_INPUT"
 
 
+class UnknownInput:
+    """Estimate selected inputs freely as OCP controls (no regularization).
+
+    Unlike :class:`InputRandomWalk`, :class:`InputFirstDiffReg`, or
+    :class:`InputTrackingTerm`, this adds no objective term. The optimizer
+    chooses ``u`` at each stage subject only to dynamics and measurement fit.
+
+    Use when an input is unknown and you do not want smoothness or tracking
+    penalties (e.g. a load torque with no prior on its magnitude or rate).
+    """
+
+    def __init__(self, target_idx: list):
+        """Declare ``target_idx`` as free unknown inputs in the Acados control vector."""
+        self.target_idx = list(target_idx)
+        self.target_type = "UNKNOWN_INPUT"
+
+
 def weight_from_lambda_u(
     dim: int, lambda_u: Union[float, List[float], np.ndarray]
 ) -> NoiseWeight:

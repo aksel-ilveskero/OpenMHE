@@ -26,7 +26,7 @@ If you see a **dimension mismatch** (`status -3` / stale `libopenmhe_mhe_run.so`
 | `run_loop.c` / `run_loop.h` | Sliding-window driver: yref/pin setup, warm-start shift, per-window solve dispatch |
 | `lti_fast.c` / `lti_fast.h` | LTI + `LINEAR_LS` vector-only SQP-RTI step |
 | `profile.h` | Optional per-window timing (`OPENMHE_PROFILE=1`) |
-| `filter_arrival.h` | EKF arrival filter, null-space-aware `P^{-1}`, Cholesky utilities |
+| `filter_arrival.h` | EKF/UKF arrival filter, null-space-aware `P^{-1}`, Cholesky utilities |
 
 ## Profiling
 
@@ -122,6 +122,8 @@ current fast path still goes through Acados NLP submodules.
 
 ```bash
 pytest tests/test_lti_fast.py -q
+pytest tests/test_c_runner_parity.py -q   # EKF/UKF C vs Python
+pytest tests/test_input_partition.py -q   # KnownInput, UnknownInput, RW partition
 ```
 
 Compares fast vs full C solve and vs Python `run_solver` on tiny LTI problems,
