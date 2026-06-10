@@ -1,12 +1,25 @@
+/**
+ * LTI EKF/UKF and arrival-weight inversion for sliding-window MHE.
+ *
+ * See ``filter_arrival.h`` for the public API and timing contract with
+ * ``run_loop.c``.  Internal helpers use stack VLAs sized by plant ``nx`` /
+ * ``ny`` (typically ≤ 50); no heap allocation.
+ */
 #include <math.h>
 #include <string.h>
 
 #include "filter_arrival.h"
 
+/** Diagonal regularisation when Cholesky fails (UKF sigma points, plain inv). */
 #define CHOL_REG 1e-9
 
 int openmhe_symmetric_inv(const double *P, int n, double *P_inv);
 
+/* -------------------------------------------------------------------------- */
+/* Dense linear-algebra helpers (row-major)                                   */
+/* -------------------------------------------------------------------------- */
+
+/** ``y = A x`` with ``A`` ``m×n``, ``x`` length ``n``, ``y`` length ``m``. */
 static void mat_vec(
     const double *A, int m, int n, const double *x, double *y)
 {
@@ -19,6 +32,7 @@ static void mat_vec(
     }
 }
 
+/** ``P += w * a a^T`` for symmetric ``P`` stored row-major. */
 static void outer_add(double *P, int n, const double *a, double w)
 {
     for (int i = 0; i < n; ++i) {
@@ -28,6 +42,7 @@ static void outer_add(double *P, int n, const double *a, double w)
     }
 }
 
+/** ``P -= K P_yy K^T`` (Joseph-form covariance update in UKF). */
 static void subtract_kpk(double *P, int n, const double *K, const double *P_yy, int ny)
 {
     for (int i = 0; i < n; ++i) {
@@ -43,6 +58,7 @@ static void subtract_kpk(double *P, int n, const double *K, const double *P_yy, 
     }
 }
 
+/** Lower-triangular Cholesky ``L`` with ``A = L L^T``.  Returns -1 if not SPD. */
 static int cholesky_lower(const double *A, int n, double *L)
 {
     for (int i = 0; i < n * n; ++i) {
@@ -67,6 +83,11 @@ static int cholesky_lower(const double *A, int n, double *L)
     return 0;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Discrete EKF on the plant LTI model                                        */
+/* -------------------------------------------------------------------------- */
+
+/** Predict: ``x ← A x + B u``, ``P ← A P A^T + Q``.  Overwrites ``x``, ``P``. */
 static void ekf_predict(
     const openmhe_filter_config_t *cfg, double *x, double *P, const double *u_t)
 {
@@ -102,6 +123,13 @@ static void ekf_predict(
     memcpy(P, APAt, (size_t)(n * n) * sizeof(double));
 }
 
+/**
+ * Measurement update with Joseph-form covariance for numerical stability:
+ * ``P ← (I-KC) P (I-KC)^T + K R K^T``.
+ *
+ * Returns silently if innovation covariance ``S = C P C^T + R`` is not SPD
+ * (should not occur with positive ``R``).
+ */
 static void ekf_update(
     const openmhe_filter_config_t *cfg,
     double *x,
@@ -210,26 +238,9 @@ static void ekf_update(
     }
 }
 
-void openmhe_filter_init(
-    openmhe_filter_state_t *state,
-    const openmhe_filter_config_t *cfg,
-    double *x,
-    double *P,
-    openmhe_ukf_workspace_t *ws)
-{
-    const int n = cfg->nx;
-    state->cfg = *cfg;
-    state->posterior_t = -1;
-    state->x = x;
-    state->P = P;
-    state->ws = ws;
-    state->lambda = cfg->alpha * cfg->alpha * (n + cfg->kappa) - n;
-    memset(x, 0, (size_t)n * sizeof(double));
-    memset(P, 0, (size_t)(n * n) * sizeof(double));
-    for (int i = 0; i < n; ++i) {
-        P[i * n + i] = cfg->Q[i * n + i];
-    }
-}
+/* -------------------------------------------------------------------------- */
+/* UKF (unit tests; not used in production run_c_solver path)                 */
+/* -------------------------------------------------------------------------- */
 
 static void ukf_sigma_points(
     const double *x,
@@ -418,6 +429,31 @@ static void ukf_unscented_update(
     subtract_kpk(P_pred, n, K, P_yy, ny);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Public filter API                                                          */
+/* -------------------------------------------------------------------------- */
+
+void openmhe_filter_init(
+    openmhe_filter_state_t *state,
+    const openmhe_filter_config_t *cfg,
+    double *x,
+    double *P,
+    openmhe_ukf_workspace_t *ws)
+{
+    const int n = cfg->nx;
+    state->cfg = *cfg;
+    state->posterior_t = -1;
+    state->x = x;
+    state->P = P;
+    state->ws = ws;
+    state->lambda = cfg->alpha * cfg->alpha * (n + cfg->kappa) - n;
+    memset(x, 0, (size_t)n * sizeof(double));
+    memset(P, 0, (size_t)(n * n) * sizeof(double));
+    for (int i = 0; i < n; ++i) {
+        P[i * n + i] = cfg->Q[i * n + i];
+    }
+}
+
 void openmhe_filter_assimilate(
     openmhe_filter_state_t *state, const double *y_t, const double *u_t)
 {
@@ -463,6 +499,10 @@ void openmhe_filter_prior(
     ukf_unscented_predict(state, u_t, x_bar, P_prior);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Arrival weight ``P^{-1}`` (null-space aware, matches Python)               */
+/* -------------------------------------------------------------------------- */
+
 static void mat_copy(double *dst, const double *src, int n)
 {
     memcpy(dst, src, (size_t)(n * n) * sizeof(double));
@@ -479,7 +519,13 @@ static void mat_sym_set(double *A, int n, int i, int j, double v)
     A[j * n + i] = v;
 }
 
-/** Jacobi eigen-decomposition for real symmetric ``A`` (row-major). */
+/**
+ * Symmetric Jacobi sweeps until off-diagonal energy is tiny.
+ *
+ * ``n`` is small (``n_arrival`` ≤ ``nx_base``, typically < 50), so this is
+ * cheaper than linking LAPACK and sufficient for arrival-weight parity with
+ * ``scipy.linalg.eigh`` in Python.
+ */
 static void symmetric_jacobi_eigh(
     const double *A_in, int n, double *evals, double *V)
 {
@@ -545,6 +591,7 @@ static void symmetric_jacobi_eigh(
     }
 }
 
+/** Reconstruct ``P_inv = V diag(w) V^T`` from filtered eigenpairs. */
 void openmhe_invert_arrival_covariance(
     const double *P,
     int n,
@@ -624,6 +671,10 @@ void openmhe_arrival_weight_block(
     openmhe_invert_arrival_covariance(
         P_sub, n_arrival, W_block, OPENMHE_ARRIVAL_INV_TOL, OPENMHE_ARRIVAL_MAX_WEIGHT);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Plain SPD inverse (innovation covariances inside EKF/UKF update)           */
+/* -------------------------------------------------------------------------- */
 
 int openmhe_symmetric_inv(const double *P, int n, double *P_inv)
 {

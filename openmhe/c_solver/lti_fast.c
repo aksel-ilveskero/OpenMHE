@@ -18,6 +18,7 @@
 
 #include "lti_fast.h"
 
+/** Check if the plan is a linear LS plan. */
 int openmhe_mhe_is_linear_ls_plan(openmhe_mhe_solver_capsule *capsule)
 {
     if (capsule == NULL) {
@@ -42,7 +43,7 @@ int openmhe_mhe_is_linear_ls_plan(openmhe_mhe_solver_capsule *capsule)
     return 1;
 }
 
-/** Assemble QP vectors without recomputing constant Jacobians / Hessians. */
+/** Assemble quadratic program vectors without recomputing constant Jacobians / Hessians. */
 static void openmhe_approximate_qp_vectors_only(
     ocp_nlp_config *config,
     ocp_nlp_dims *dims,
@@ -71,6 +72,11 @@ static void openmhe_approximate_qp_vectors_only(
 
         const int hess_stage = (i == 0 && stage0_full_hess);
         if (!hess_stage) {
+            /*
+             * Skip cost Hessians on stages 1…N (LTI fast path).  Stage 0 still
+             * gets a full Hessian when ``stage0_full_hess`` is set — required
+             * each window for dynamic EKF arrival because ``W0`` changes.
+             */
             config->cost[i]->opts_set(
                 config->cost[i], nlp_opts->cost[i], "compute_hess", &compute_hess_off);
         }
@@ -143,6 +149,10 @@ int openmhe_mhe_solve_lti_fast(
     timings->time_reg += acados_toc(&timer1);
 
     const bool precondensed_lhs = (*lhs_valid) && !stage0_full_hess;
+    /*
+     * When dynamic arrival refreshed stage-0 ``W``, ``lhs_valid`` is cleared
+     * inside this function so the next full solve rebuilds the condensed LHS.
+     */
     const int qp_status = ocp_nlp_solve_qp_and_correct_dual(
         config, dims, nlp_opts, nlp_mem, nlp_work, precondensed_lhs, NULL, NULL,
         NULL, NULL, NULL);

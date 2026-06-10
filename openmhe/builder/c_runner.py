@@ -222,6 +222,7 @@ def _u_extract_specs(solver) -> np.ndarray:
 
 
 def _index_array(mapping: dict[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Convert a dictionary of indices to arrays."""
     if not mapping:
         return np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32)
     keys = sorted(mapping.keys())
@@ -288,6 +289,7 @@ def run_c_solver(
             "or run_solver() for UKF."
         )
 
+    # Setup libraries, functions and types
     lib = _load_run_lib(rebuild=rebuild)
     lib.openmhe_mhe_acados_create_capsule.restype = ctypes.c_void_p
     lib.openmhe_mhe_acados_free_capsule.argtypes = [ctypes.c_void_p]
@@ -297,36 +299,43 @@ def run_c_solver(
     lib.openmhe_mhe_free_solver.restype = ctypes.c_int
     _c_double_p = ctypes.POINTER(ctypes.c_double)
     _c_int_p = ctypes.POINTER(ctypes.c_int)
+
+    # Define the arguments for the C function
     lib.openmhe_mhe_run_sliding.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(_RunConfig),
-        _c_double_p,
-        _c_double_p,
-        _c_double_p,
-        _c_double_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_int_p,
-        _c_double_p,
-        _c_double_p,
-        ctypes.POINTER(_FilterSetup),
-        _c_double_p,
-        _c_double_p,
-        _c_double_p,
+        ctypes.c_void_p, # capsule
+        ctypes.POINTER(_RunConfig), # cfg
+        _c_double_p, # yref
+        _c_double_p, # x_bar_pre
+        _c_double_p, # W0_stage_pre
+        _c_double_p, # pin_vals
+        _c_int_p, # controlled_idx
+        _c_int_p, # u_extract_raw
+        _c_int_p, # rw_idx
+        _c_int_p, # rw_col
+        _c_int_p, # fd_idx
+        _c_int_p, # fd_col
+        _c_int_p, # sd_idx
+        _c_int_p, # sd1_col
+        _c_int_p, # sd2_col
+        _c_int_p, # unmeasured_ui
+        _c_int_p, # arrival_state_idx
+        _c_double_p, # u_meas
+        _c_double_p, # y_meas
+        ctypes.POINTER(_FilterSetup), # filter_setup
+        _c_double_p, # u_hat
+        _c_double_p, # x_hat
+        _c_double_p, # u_raw_hat
     ]
+
+    # C function return type is int status code
     lib.openmhe_mhe_run_sliding.restype = ctypes.c_int
 
+    # Convert input arrays to numpy arrays
     y = np.asarray(y, dtype=np.float64, order="C")
     if y.ndim == 1:
         y = y.reshape(-1, 1)
+
+    # Set basic dimensions
     n_steps = y.shape[1]
     nu = solver._nu
     nx_base = solver._nx_base
@@ -340,6 +349,8 @@ def run_c_solver(
 
     builder = solver._builder
     nw = solver._nw
+    
+    # Precompute measured state references
     yrefs = _precompute_yrefs(builder, y, u, nx_base, nu, nw, n_steps)
     ny_stage = yrefs.shape[1]
 
@@ -347,20 +358,27 @@ def run_c_solver(
     u_raw_rm = np.full((n_est, nu), np.nan, order="C")
     x_hat_rm = np.full((n_est, nx_base), np.nan, order="C")
 
+    # Check for arrival cost
     has_arrival = solver._arrival_slice is not None
     dynamic_arrival = (
         has_arrival
         and getattr(solver, "_filter_kind", None) == "ekf"
         and solver._W0_template is not None
     )
+
+    # Build arrival cost
     filter_setup = _build_filter_setup(solver, has_arrival)
+
+    # Convert measurement array to contiguous array
     y_meas = np.ascontiguousarray(y.T, dtype=np.float64)
 
+    # Check for pinned (known) inputs
     pin_vals = None
     if solver._pin_u_idx and u is not None:
         known_inputs = np.asarray(solver._known_inputs, dtype=int)
         pin_vals = np.ascontiguousarray(u[known_inputs, :].T)
 
+    # Build index arrays for different input regulator types
     rw_idx, rw_col = _index_array(solver._load_state_col)
     fd_idx, fd_col = _index_array(solver._col_fd1)
     sd_idx, sd1_col = _index_array(solver._col_sd1)

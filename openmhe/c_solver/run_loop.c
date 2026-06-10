@@ -1,9 +1,11 @@
 /**
  * Sliding-window MHE driver (C counterpart of ``openmhe.run_solver``).
  *
- * Sets per-window references and pins, seeds regulator states, dispatches
- * either a full Acados solve or the LTI fast path (``lti_fast.c``), then
- * warm-starts the next window.  See ``openmhe/c_solver/README.md``.
+ * Per window: seed regulator states → set ``yref`` / pins → (optional) EKF
+ * arrival prior → Acados SQP-RTI solve → warm-start shift → filter assimilate.
+ *
+ * Dynamic ``EKFArrivalCost`` is evaluated in-process via ``filter_arrival.c``
+ * (no Python pre-pass).  See ``openmhe/c_solver/README.md``.
  */
 #define _POSIX_C_SOURCE 199309L
 
@@ -255,6 +257,12 @@ static void set_stage0_yref(
     const double *x_bar,
     double *yref0)
 {
+    /*
+     * Stage 0 carries the usual measurement / regulator residuals (first
+     * ny_stage rows) plus an arrival block: ||x_0 - x_bar||^2_{W_arrival}.
+     * ``x_bar`` comes from the EKF prior when dynamic arrival is active, or
+     * from precomputed tables / warm-start otherwise.
+     */
     memset(yref0, 0, (size_t)ny0 * sizeof(double));
     memcpy(yref0, yref_j, (size_t)ny_stage * sizeof(double));
     if (x_bar != NULL && n_arrival > 0) {
@@ -269,6 +277,12 @@ static void set_stage0_yref(
     set_yref_stage(nlp_config, nlp_dims, nlp_in, 0, yref0);
 }
 
+/**
+ * Insert row-major ``W_block`` into column-major ``W0_buf`` at the arrival rows.
+ *
+ * Acados expects ``W`` in Fortran (column-major) layout.  ``W_block`` is the
+ * ``n_arrival × n_arrival`` output of ``openmhe_arrival_weight_block`` (C order).
+ */
 static void scatter_arrival_W(
     double *W0_buf,
     int ny0,
@@ -456,6 +470,10 @@ int openmhe_mhe_run_sliding(
         && filter_setup->kind == OPENMHE_FILTER_EKF
         && cfg->dynamic_arrival;
 
+    /*
+     * Incremental EKF for dynamic arrival cost (replaces Python pre-pass).
+     * Stack buffers scale with plant nx_base (not augmented nx).
+     */
     openmhe_filter_state_t filter_st;
     openmhe_filter_config_t filter_cfg;
     double filter_x[nx_base];
@@ -486,6 +504,7 @@ int openmhe_mhe_run_sliding(
         double W0_buf[NY0 * NY0];
 
         if (filter_live && u_meas != NULL) {
+            /* Prior at t=idx before y[idx] enters the filter (matches Python). */
             const double *u_t = u_meas + (size_t)idx * (size_t)filter_setup->nu;
             openmhe_filter_prior(&filter_st, u_t, x_bar_live, P_prior);
             x_bar_win = x_bar_live;
@@ -531,6 +550,10 @@ int openmhe_mhe_run_sliding(
                     n_arrival, arrival_state_idx, yref_j, x_bar_win, yref0);
                 if (cfg->dynamic_arrival) {
                     if (filter_live && filter_setup->W0_template != NULL) {
+                        /*
+                         * Copy static stage-0 weights, then patch only the
+                         * arrival diagonal block from invert_arrival(P_prior).
+                         */
                         memcpy(
                             W0_buf, filter_setup->W0_template,
                             (size_t)ny0 * (size_t)ny0 * sizeof(double));
@@ -566,6 +589,10 @@ int openmhe_mhe_run_sliding(
         OPENMHE_PROF_NOW(&_omhe_tb);
         openmhe_profile_add(&prof.solve, &_omhe_ta, &_omhe_tb);
         if (status != 0) {
+            /*
+             * Advance the filter even when the NLP fails so the next window's
+             * prior stays aligned with Python ``window_prior(idx+1, …)``.
+             */
             if (filter_live && y_meas != NULL && u_meas != NULL) {
                 const double *y_t =
                     y_meas + (size_t)idx * (size_t)filter_setup->ny;
@@ -604,6 +631,7 @@ int openmhe_mhe_run_sliding(
         openmhe_profile_add(&prof.shift, &_omhe_ta, &_omhe_tb);
 
         if (filter_live && y_meas != NULL && u_meas != NULL) {
+            /* Assimilate y[idx] after this window (posterior ← idx). */
             const double *y_t = y_meas + (size_t)idx * (size_t)filter_setup->ny;
             const double *u_t = u_meas + (size_t)idx * (size_t)filter_setup->nu;
             openmhe_filter_assimilate(&filter_st, y_t, u_t);

@@ -1,3 +1,9 @@
+/**
+ * Unit tests for ``openmhe_invert_arrival_covariance`` and
+ * ``openmhe_arrival_weight_block``.  Reference values come from Python
+ * ``openmhe.invert_arrival_covariance`` (not plain ``numpy.linalg.inv`` when
+ * null-space directions are present).
+ */
 #include <stdio.h>
 #include <string.h>
 
