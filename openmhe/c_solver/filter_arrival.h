@@ -1,6 +1,5 @@
 /**
- * LTI EKF/UKF and Cholesky utilities for arrival-cost prototyping and unit tests.
- * The production C MHE driver precomputes arrival in Python; see ``c_runner.py``.
+ * LTI EKF/UKF, arrival-weight inversion, and Cholesky utilities for the C MHE driver.
  */
 #ifndef OPENMHE_FILTER_ARRIVAL_H_
 #define OPENMHE_FILTER_ARRIVAL_H_
@@ -77,6 +76,32 @@ void openmhe_filter_prior(
  * Returns 0 on success.
  */
 int openmhe_symmetric_inv(const double *P, int n, double *P_inv);
+
+/** Defaults matching ``openmhe.invert_arrival_covariance`` in Python. */
+#define OPENMHE_ARRIVAL_INV_TOL 1e-8
+#define OPENMHE_ARRIVAL_MAX_WEIGHT 1e6
+
+/**
+ * Arrival weight ``P^{-1}`` with null-space eigenvalues zeroed and weights capped.
+ * ``P`` and ``P_inv`` are ``n×n`` row-major symmetric.
+ */
+void openmhe_invert_arrival_covariance(
+    const double *P,
+    int n,
+    double *P_inv,
+    double tol,
+    double max_weight);
+
+/**
+ * Extract the plant arrival block from ``P_full`` and write ``n_arrival×n_arrival``
+ * inverted weights into ``W_block`` (row-major).
+ */
+void openmhe_arrival_weight_block(
+    const double *P_full,
+    int nx,
+    const int *arrival_state_idx,
+    int n_arrival,
+    double *W_block);
 
 #ifdef __cplusplus
 }

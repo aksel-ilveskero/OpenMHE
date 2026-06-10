@@ -32,7 +32,7 @@ LDFLAGS += -Wl,-rpath,$(CODEGEN_DIR) -Wl,-rpath,$(LIB_PATH)
 LDLIBS += -lacados_ocp_solver_openmhe_mhe -lacados -lhpipm -lblasfeo -lm
 
 RUN_LIB = libopenmhe_mhe_run.so
-RUN_OBJ = run_loop.o lti_fast.o
+RUN_OBJ = run_loop.o lti_fast.o filter_arrival.o
 
 TEST_CFLAGS = $(CPPFLAGS) $(CFLAGS) -I.
 
@@ -56,7 +56,7 @@ filter_arrival.o: filter_arrival.c filter_arrival.h
 $(RUN_LIB): $(RUN_OBJ) codegen_lib
 	$(CC) -shared $(RUN_OBJ) -o $@ $(LDFLAGS) $(LDLIBS)
 
-test: test/test_filter test/test_inv
+test: test/test_filter test/test_inv test/test_arrival_inv
 
 test/test_filter: test/test_filter.c filter_arrival.o
 	$(CC) $(TEST_CFLAGS) -o $@ test/test_filter.c filter_arrival.o -lm
@@ -64,6 +64,9 @@ test/test_filter: test/test_filter.c filter_arrival.o
 test/test_inv: test/test_inv.c filter_arrival.o
 	$(CC) $(TEST_CFLAGS) -o $@ test/test_inv.c filter_arrival.o -lm
 
+test/test_arrival_inv: test/test_arrival_inv.c filter_arrival.o
+	$(CC) $(TEST_CFLAGS) -o $@ test/test_arrival_inv.c filter_arrival.o -lm
+
 clean:
 	$(RM) $(RUN_OBJ) $(RUN_LIB)
-	$(RM) test/test_filter test/test_inv
+	$(RM) test/test_filter test/test_inv test/test_arrival_inv

@@ -463,6 +463,168 @@ void openmhe_filter_prior(
     ukf_unscented_predict(state, u_t, x_bar, P_prior);
 }
 
+static void mat_copy(double *dst, const double *src, int n)
+{
+    memcpy(dst, src, (size_t)(n * n) * sizeof(double));
+}
+
+static void mat_zero(double *A, int n)
+{
+    memset(A, 0, (size_t)(n * n) * sizeof(double));
+}
+
+static void mat_sym_set(double *A, int n, int i, int j, double v)
+{
+    A[i * n + j] = v;
+    A[j * n + i] = v;
+}
+
+/** Jacobi eigen-decomposition for real symmetric ``A`` (row-major). */
+static void symmetric_jacobi_eigh(
+    const double *A_in, int n, double *evals, double *V)
+{
+    double A[n * n];
+    mat_copy(A, A_in, n);
+    mat_zero(V, n);
+    for (int i = 0; i < n; ++i) {
+        V[i * n + i] = 1.0;
+    }
+
+    for (int sweep = 0; sweep < 50; ++sweep) {
+        double off = 0.0;
+        for (int p = 0; p < n; ++p) {
+            for (int q = p + 1; q < n; ++q) {
+                off += A[p * n + q] * A[p * n + q];
+            }
+        }
+        if (off < 1e-30) {
+            break;
+        }
+
+        for (int p = 0; p < n - 1; ++p) {
+            for (int q = p + 1; q < n; ++q) {
+                const double app = A[p * n + p];
+                const double aqq = A[q * n + q];
+                const double apq = A[p * n + q];
+                if (fabs(apq) < 1e-15 * (fabs(app) + fabs(aqq))) {
+                    continue;
+                }
+                const double tau = (aqq - app) / (2.0 * apq);
+                const double t = (tau >= 0.0 ? 1.0 : -1.0)
+                    / (fabs(tau) + sqrt(1.0 + tau * tau));
+                const double c = 1.0 / sqrt(1.0 + t * t);
+                const double s = t * c;
+
+                for (int k = 0; k < n; ++k) {
+                    if (k != p && k != q) {
+                        const double akp = A[k * n + p];
+                        const double akq = A[k * n + q];
+                        mat_sym_set(A, n, k, p, c * akp - s * akq);
+                        mat_sym_set(A, n, k, q, s * akp + c * akq);
+                    }
+                }
+                const double new_app = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+                const double new_aqq = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+                A[p * n + p] = new_app;
+                A[q * n + q] = new_aqq;
+                A[p * n + q] = 0.0;
+                A[q * n + p] = 0.0;
+
+                for (int k = 0; k < n; ++k) {
+                    const double vkp = V[k * n + p];
+                    const double vkq = V[k * n + q];
+                    V[k * n + p] = c * vkp - s * vkq;
+                    V[k * n + q] = s * vkp + c * vkq;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < n; ++i) {
+        evals[i] = A[i * n + i];
+    }
+}
+
+void openmhe_invert_arrival_covariance(
+    const double *P,
+    int n,
+    double *P_inv,
+    double tol,
+    double max_weight)
+{
+    if (n <= 0) {
+        return;
+    }
+
+    double evals[n];
+    double V[n * n];
+    symmetric_jacobi_eigh(P, n, evals, V);
+
+    double lam_max = evals[0];
+    for (int i = 1; i < n; ++i) {
+        if (evals[i] > lam_max) {
+            lam_max = evals[i];
+        }
+    }
+    if (lam_max < 1.0) {
+        lam_max = 1.0;
+    }
+    const double thresh = tol * lam_max;
+
+    double w_evals[n];
+    for (int i = 0; i < n; ++i) {
+        if (evals[i] > thresh) {
+            const double w = 1.0 / evals[i];
+            w_evals[i] = w < max_weight ? w : max_weight;
+        } else {
+            w_evals[i] = 0.0;
+        }
+    }
+
+    mat_zero(P_inv, n);
+    for (int k = 0; k < n; ++k) {
+        if (w_evals[k] == 0.0) {
+            continue;
+        }
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                P_inv[i * n + j] += w_evals[k] * V[i * n + k] * V[j * n + k];
+            }
+        }
+    }
+}
+
+void openmhe_arrival_weight_block(
+    const double *P_full,
+    int nx,
+    const int *arrival_state_idx,
+    int n_arrival,
+    double *W_block)
+{
+    if (n_arrival <= 0) {
+        return;
+    }
+
+    double P_sub[n_arrival * n_arrival];
+    if (arrival_state_idx == NULL) {
+        for (int i = 0; i < n_arrival; ++i) {
+            for (int j = 0; j < n_arrival; ++j) {
+                P_sub[i * n_arrival + j] = P_full[i * nx + j];
+            }
+        }
+    } else {
+        for (int i = 0; i < n_arrival; ++i) {
+            const int ri = arrival_state_idx[i];
+            for (int j = 0; j < n_arrival; ++j) {
+                const int rj = arrival_state_idx[j];
+                P_sub[i * n_arrival + j] = P_full[ri * nx + rj];
+            }
+        }
+    }
+    openmhe_invert_arrival_covariance(
+        P_sub, n_arrival, W_block, OPENMHE_ARRIVAL_INV_TOL, OPENMHE_ARRIVAL_MAX_WEIGHT);
+}
+
 int openmhe_symmetric_inv(const double *P, int n, double *P_inv)
 {
     double L[n * n];

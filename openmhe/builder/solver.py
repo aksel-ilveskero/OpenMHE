@@ -12,8 +12,10 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from openmhe.frontend.system import SystemModel
 from openmhe.mhe_strategies import ObjectiveBuilder
 from openmhe.mhe_strategies.arrival_cost import (
+    EKFArrivalCost,
     arrival_covariance_submatrix,
     invert_arrival_covariance,
+    noise_covs_from_builder,
 )
 from openmhe.frontend.acados_runtime import acados_root, ensure_acados_environment
 from openmhe.paths import get_codegen_dir, mhe_json_path
@@ -618,6 +620,21 @@ def build_mhe_solver(
     solver._system = mhe_system
     solver._nlp_solver_type = nlp_solver_type
     solver._linear_ls = linear_ls
+    solver._filter_kind = None
+    if isinstance(arrival_cost, EKFArrivalCost):
+        Q_f, R_f = noise_covs_from_builder(builder, nx_base, mhe_system.ny)
+        D_f = (
+            np.asarray(mhe_system.D, dtype=float)
+            if mhe_system.D is not None
+            else np.zeros((mhe_system.ny, mhe_system.nu))
+        )
+        solver._filter_kind = "ekf"
+        solver._filter_A = np.ascontiguousarray(mhe_system.A, dtype=np.float64)
+        solver._filter_B = np.ascontiguousarray(mhe_system.B, dtype=np.float64)
+        solver._filter_C = np.ascontiguousarray(mhe_system.C, dtype=np.float64)
+        solver._filter_D = np.ascontiguousarray(D_f, dtype=np.float64)
+        solver._filter_Q = np.ascontiguousarray(Q_f, dtype=np.float64)
+        solver._filter_R = np.ascontiguousarray(R_f, dtype=np.float64)
     solver._lti_linear_ls_fast = _lti_fast_enabled(
         lti_linear_ls_fast, linear_ls, nlp_solver_type, stacklevel=2
     )

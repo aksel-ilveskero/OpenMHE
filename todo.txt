@@ -16,17 +16,17 @@
     - First difference
     - Second difference
     - Random walk
-- Arrival costs (Python)
+- Arrival costs (Python + C EKF)
     - Steady-state / fixed P
-    - EKF (dynamic P, precomputed for C driver)
+    - EKF dynamic P (in-C incremental filter in run_c_solver)
 - C sliding-window MHE driver (run_c_solver / run_loop.c)
     - Pointer-shifted yrefs, stack buffers sized from codegen
-    - Python EKF arrival pre-pass (x_bar, W0 per window)
+    - In-C incremental EKF arrival (x_bar, W0 per window in run_loop.c)
     - Bulk warm-start: ocp_nlp_get_all + memmove + set_all
     - Input pins (lbu/ubu) only when values change
     - Rebuild when acados header dimensions change (no stale NX)
     - post_steps hook (e.g. PI observer in ot_4_disk)
-- filter_arrival.c: EKF/UKF + Cholesky utilities (unit tests only)
+- filter_arrival.c: EKF/UKF + arrival-weight inversion + Cholesky (linked in run lib)
 - LTI + LINEAR_LS fast path (lti_fast.c)
     - Window 0: full SQP-RTI + condense_qp_lhs
     - Windows 1+: vector-only QP update + precondensed_lhs solve (~25% solve time on ot_22)
@@ -54,8 +54,7 @@
 - Slew rates for states as well
 
 - Arrival costs
-    - UKF in run_c_solver (use run_solver for UKF until in-C filter is fixed at scale)
-    - Optional: in-C incremental EKF (currently wrong at ot_22 scale; Python precompute is the path)
+    - UKF in run_c_solver (use run_solver for UKF until in-C UKF is fixed at scale)
 
 - Real-time performance (target: solve + overhead < dt, ~1 ms on ot_22)
     - Baseline (N=3 subsample): ~1.8 ms/window full RTI, ~1.34 ms/window fast path

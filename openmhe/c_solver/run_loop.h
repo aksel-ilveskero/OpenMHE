@@ -2,6 +2,7 @@
 #define OPENMHE_RUN_LOOP_H_
 
 #include "acados_solver_openmhe_mhe.h"
+#include "filter_arrival.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,6 +46,24 @@ typedef struct {
     int linear_ls;
 } openmhe_run_config_t;
 
+/** In-C EKF arrival filter setup (NULL disables the live filter path). */
+typedef struct {
+    openmhe_filter_kind_t kind;
+    int nx_base;
+    int ny;
+    int nu;
+    int n_arrival;
+    int arrival_w_off;
+    const double *A;
+    const double *B;
+    const double *C;
+    const double *D;
+    const double *Q;
+    const double *R;
+    /** Stage-0 weight template, ``ny0×ny0`` column-major (Fortran). */
+    const double *W0_template;
+} openmhe_arrival_filter_setup_t;
+
 /** Allocate and set up the Acados NLP solver inside ``capsule``. */
 int openmhe_mhe_init_solver(openmhe_mhe_solver_capsule *capsule);
 
@@ -60,8 +79,10 @@ int openmhe_mhe_free_solver(openmhe_mhe_solver_capsule *capsule);
  * by ``ny_stage`` each window (no per-window copy of the full table).
  * ``x_bar_pre``: ``(n_est, nx_base)`` row-major arrival mean, or NULL.
  * ``W0_stage_pre``: ``(n_est, ny0, ny0)`` Fortran stage-0 weights for dynamic
- * arrival, or NULL.
- * ``pin_vals``: ``(n_steps, n_pin)`` row-major input pins, or NULL.
+ * arrival, or NULL (legacy; unused when ``filter_setup`` is set).
+ * ``y_meas``: ``(n_steps, ny)`` row-major raw measurements for the in-C filter,
+ * or NULL when ``filter_setup`` is NULL.
+ * ``filter_setup``: live EKF arrival configuration, or NULL.
  */
 int openmhe_mhe_run_sliding(
     openmhe_mhe_solver_capsule *capsule,
@@ -82,6 +103,8 @@ int openmhe_mhe_run_sliding(
     const int *unmeasured_ui,
     const int *arrival_state_idx,
     const double *u_meas,
+    const double *y_meas,
+    const openmhe_arrival_filter_setup_t *filter_setup,
     double *u_hat,
     double *x_hat,
     double *u_hat_raw);

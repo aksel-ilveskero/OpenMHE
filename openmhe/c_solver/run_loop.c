@@ -13,6 +13,7 @@
 #include "acados/ocp_nlp/ocp_nlp_common.h"
 #include "acados/ocp_nlp/ocp_nlp_sqp_rti.h"
 
+#include "filter_arrival.h"
 #include "lti_fast.h"
 #include "profile.h"
 #include "run_loop.h"
@@ -268,6 +269,21 @@ static void set_stage0_yref(
     set_yref_stage(nlp_config, nlp_dims, nlp_in, 0, yref0);
 }
 
+static void scatter_arrival_W(
+    double *W0_buf,
+    int ny0,
+    int arrival_w_off,
+    int n_arrival,
+    const double *W_block)
+{
+    for (int j = 0; j < n_arrival; ++j) {
+        for (int i = 0; i < n_arrival; ++i) {
+            W0_buf[(arrival_w_off + i) + (arrival_w_off + j) * ny0] =
+                W_block[i * n_arrival + j];
+        }
+    }
+}
+
 /** Factor the condensed QP Hessian / coupling once (after a full RTI prep step). */
 static void openmhe_condense_qp_lhs(
     ocp_nlp_config *config,
@@ -357,6 +373,8 @@ int openmhe_mhe_run_sliding(
     const int *unmeasured_ui,
     const int *arrival_state_idx,
     const double *u_meas,
+    const double *y_meas,
+    const openmhe_arrival_filter_setup_t *filter_setup,
     double *u_hat,
     double *x_hat,
     double *u_hat_raw)
@@ -434,10 +452,44 @@ int openmhe_mhe_run_sliding(
         use_fast = 1; /* first window always runs full solve + condense_lhs */
     }
 
+    const int filter_live = filter_setup != NULL
+        && filter_setup->kind == OPENMHE_FILTER_EKF
+        && cfg->dynamic_arrival;
+
+    openmhe_filter_state_t filter_st;
+    openmhe_filter_config_t filter_cfg;
+    double filter_x[nx_base];
+    double filter_P[nx_base * nx_base];
+
+    if (filter_live) {
+        filter_cfg.kind = OPENMHE_FILTER_EKF;
+        filter_cfg.nx = filter_setup->nx_base;
+        filter_cfg.ny = filter_setup->ny;
+        filter_cfg.nu = filter_setup->nu;
+        filter_cfg.alpha = 0.0;
+        filter_cfg.beta = 0.0;
+        filter_cfg.kappa = 0.0;
+        filter_cfg.A = filter_setup->A;
+        filter_cfg.B = filter_setup->B;
+        filter_cfg.C = filter_setup->C;
+        filter_cfg.D = filter_setup->D;
+        filter_cfg.Q = filter_setup->Q;
+        filter_cfg.R = filter_setup->R;
+        openmhe_filter_init(&filter_st, &filter_cfg, filter_x, filter_P, NULL);
+    }
+
     for (int idx = 0; idx < n_est; ++idx) {
         const int t_start = idx;
         const double *x_bar_win = NULL;
-        if (x_bar_pre != NULL) {
+        double x_bar_live[nx_base];
+        double P_prior[nx_base * nx_base];
+        double W0_buf[NY0 * NY0];
+
+        if (filter_live && u_meas != NULL) {
+            const double *u_t = u_meas + (size_t)idx * (size_t)filter_setup->nu;
+            openmhe_filter_prior(&filter_st, u_t, x_bar_live, P_prior);
+            x_bar_win = x_bar_live;
+        } else if (x_bar_pre != NULL) {
             x_bar_win = x_bar_pre + (size_t)idx * (size_t)nx_base;
         }
 
@@ -477,11 +529,27 @@ int openmhe_mhe_run_sliding(
                 set_stage0_yref(
                     nlp_config, nlp_dims, nlp_in, ny0, ny_stage, cfg->arrival_off,
                     n_arrival, arrival_state_idx, yref_j, x_bar_win, yref0);
-                if (cfg->dynamic_arrival && W0_stage_pre != NULL) {
-                    const double *W_win = W0_stage_pre
-                        + (size_t)idx * (size_t)ny0 * (size_t)ny0;
-                    ocp_nlp_cost_model_set(
-                        nlp_config, nlp_dims, nlp_in, 0, "W", (void *)W_win);
+                if (cfg->dynamic_arrival) {
+                    if (filter_live && filter_setup->W0_template != NULL) {
+                        memcpy(
+                            W0_buf, filter_setup->W0_template,
+                            (size_t)ny0 * (size_t)ny0 * sizeof(double));
+                        if (n_arrival > 0) {
+                            double W_block[n_arrival * n_arrival];
+                            openmhe_arrival_weight_block(
+                                P_prior, nx_base, arrival_state_idx, n_arrival,
+                                W_block);
+                            scatter_arrival_W(
+                                W0_buf, ny0, cfg->arrival_off, n_arrival, W_block);
+                        }
+                        ocp_nlp_cost_model_set(
+                            nlp_config, nlp_dims, nlp_in, 0, "W", (void *)W0_buf);
+                    } else if (W0_stage_pre != NULL) {
+                        const double *W_win = W0_stage_pre
+                            + (size_t)idx * (size_t)ny0 * (size_t)ny0;
+                        ocp_nlp_cost_model_set(
+                            nlp_config, nlp_dims, nlp_in, 0, "W", (void *)W_win);
+                    }
                 }
             } else {
                 set_yref_stage(nlp_config, nlp_dims, nlp_in, j, yref_j);
@@ -498,6 +566,13 @@ int openmhe_mhe_run_sliding(
         OPENMHE_PROF_NOW(&_omhe_tb);
         openmhe_profile_add(&prof.solve, &_omhe_ta, &_omhe_tb);
         if (status != 0) {
+            if (filter_live && y_meas != NULL && u_meas != NULL) {
+                const double *y_t =
+                    y_meas + (size_t)idx * (size_t)filter_setup->ny;
+                const double *u_t =
+                    u_meas + (size_t)idx * (size_t)filter_setup->nu;
+                openmhe_filter_assimilate(&filter_st, y_t, u_t);
+            }
             yref_win += ny_stage;
             if (pin_win != NULL) {
                 pin_win += n_pin;
@@ -527,6 +602,12 @@ int openmhe_mhe_run_sliding(
         warm_start_shift_bulk(nlp_solver, nlp_in, nlp_out, N, nx, nu_ocp);
         OPENMHE_PROF_NOW(&_omhe_tb);
         openmhe_profile_add(&prof.shift, &_omhe_ta, &_omhe_tb);
+
+        if (filter_live && y_meas != NULL && u_meas != NULL) {
+            const double *y_t = y_meas + (size_t)idx * (size_t)filter_setup->ny;
+            const double *u_t = u_meas + (size_t)idx * (size_t)filter_setup->nu;
+            openmhe_filter_assimilate(&filter_st, y_t, u_t);
+        }
 
         yref_win += ny_stage;
         if (pin_win != NULL) {

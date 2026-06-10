@@ -12,10 +12,6 @@ from pathlib import Path
 import numpy as np
 
 from openmhe.builder.input_regs import unmeasured_regulator_indices
-from openmhe.mhe_strategies.arrival_cost import (
-    arrival_covariance_submatrix,
-    invert_arrival_covariance,
-)
 from openmhe.builder.solver import WindowStep, _lti_fast_enabled, _precompute_yrefs
 from openmhe.frontend.acados_runtime import (
     acados_root,
@@ -56,6 +52,57 @@ class _RunConfig(ctypes.Structure):
         ("lti_linear_ls_fast", ctypes.c_int),
         ("linear_ls", ctypes.c_int),
     ]
+
+
+class _FilterSetup(ctypes.Structure):
+    _fields_ = [
+        ("kind", ctypes.c_int),
+        ("nx_base", ctypes.c_int),
+        ("ny", ctypes.c_int),
+        ("nu", ctypes.c_int),
+        ("n_arrival", ctypes.c_int),
+        ("arrival_w_off", ctypes.c_int),
+        ("A", ctypes.c_void_p),
+        ("B", ctypes.c_void_p),
+        ("C", ctypes.c_void_p),
+        ("D", ctypes.c_void_p),
+        ("Q", ctypes.c_void_p),
+        ("R", ctypes.c_void_p),
+        ("W0_template", ctypes.c_void_p),
+    ]
+
+
+_OPENMHE_FILTER_EKF = 2
+
+
+def _build_filter_setup(solver, has_arrival: bool):
+    """Build ctypes filter setup for in-C EKF arrival, or ``None``."""
+    if not has_arrival or getattr(solver, "_filter_kind", None) != "ekf":
+        return None
+    if solver._W0_template is None:
+        return None
+    W0_template = np.asfortranarray(solver._W0_template, dtype=np.float64)
+
+    def _ptr(arr):
+        return np.ascontiguousarray(arr, dtype=np.float64).ctypes.data_as(
+            ctypes.c_void_p
+        )
+
+    return _FilterSetup(
+        kind=_OPENMHE_FILTER_EKF,
+        nx_base=int(solver._nx_base),
+        ny=int(solver._system.ny),
+        nu=int(solver._system.nu),
+        n_arrival=int(solver._n_arrival),
+        arrival_w_off=int(solver._arrival_slice.start),
+        A=_ptr(solver._filter_A),
+        B=_ptr(solver._filter_B),
+        C=_ptr(solver._filter_C),
+        D=_ptr(solver._filter_D),
+        Q=_ptr(solver._filter_Q),
+        R=_ptr(solver._filter_R),
+        W0_template=_ptr(W0_template),
+    )
 
 
 def _build_run_lib(*, force: bool = False) -> Path:
@@ -184,30 +231,6 @@ def _index_array(mapping: dict[int, int]) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def _precompute_arrival(
-    arrival_cost,
-    y: np.ndarray,
-    u: np.ndarray | None,
-    n_est: int,
-    nx_base: int,
-    W0_template: np.ndarray,
-    arrival_w_slice: slice,
-    arrival_state_idx: np.ndarray | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Python arrival pass (EKF / UKF dynamic weights for the C driver)."""
-    x_bar_stage = np.zeros((n_est, nx_base), dtype=np.float64, order="C")
-    ny0 = W0_template.shape[0]
-    W0_stage = np.zeros((n_est, ny0, ny0), dtype=np.float64, order="F")
-    for idx in range(n_est):
-        x_bar, P = arrival_cost.window_prior(idx, y, u)
-        x_bar_stage[idx, :] = x_bar
-        W0 = W0_template.copy()
-        P_sub = arrival_covariance_submatrix(P, arrival_state_idx)
-        W0[arrival_w_slice, arrival_w_slice] = invert_arrival_covariance(P_sub)
-        W0_stage[idx, :, :] = W0
-    return x_bar_stage, W0_stage
-
-
 def run_c_solver(
     solver,
     y,
@@ -217,23 +240,45 @@ def run_c_solver(
     rebuild: bool = False,
     lti_linear_ls_fast: bool | None = None,
 ):
-    """C implementation of :func:`~openmhe.run_solver` (same return values).
+    """Run the C based MHE solver.
 
-    ``post_steps`` are applied in Python after the C loop (same semantics as
-    :func:`~openmhe.run_solver`).
+    Returns the estimated control and state sequences over the entire measurement.
 
     Parameters
     ----------
-    rebuild : bool
+    solver : Solver
+        The solver object to use.
+    y : array_like
+        The measurement sequence.
+    u : array_like
+        The control sequence.
+    post_steps : list of callable, optional
+        Post-processing steps to apply after the C loop.
+    rebuild : bool, optional
         Force recompilation of ``libopenmhe_mhe_run.so`` when codegen or C
         sources changed.
-    lti_linear_ls_fast : bool or None
+    lti_linear_ls_fast : bool or None, optional
         Override ``solver._lti_linear_ls_fast``.  When enabled (default for
         all-L2 builds with ``SQP_RTI``), window 0 runs a full Acados solve and
         condenses the QP left-hand side; later windows refresh QP vectors only.
-        Requires ``nlp_solver_type='SQP_RTI'``; otherwise a warning is emitted
-        and the full solve is used.  See ``openmhe/c_solver/README.md``.
+        Requires ``nlp_solver_type='SQP_RTI'``; otherwise a warning is emitted and the full solve is used.  See ``openmhe/c_solver/README.md``.
+    
+    Returns
+    -------
+    u_hat : array_like
+        The estimated control sequence.
+    x_hat : array_like
+        The estimated state sequence.
+
+    Raises
+    ------
+    TypeError
+        If the arrival cost is a UKFArrivalCost.
+    RuntimeError
+        If the C MHE driver fails.
     """
+
+    
     from openmhe.mhe_strategies.arrival_cost import UKFArrivalCost
 
     arrival_cost = getattr(solver, "_arrival_cost", None)
@@ -272,6 +317,8 @@ def run_c_solver(
         _c_int_p,
         _c_double_p,
         _c_double_p,
+        ctypes.POINTER(_FilterSetup),
+        _c_double_p,
         _c_double_p,
         _c_double_p,
     ]
@@ -300,10 +347,14 @@ def run_c_solver(
     u_raw_rm = np.full((n_est, nu), np.nan, order="C")
     x_hat_rm = np.full((n_est, nx_base), np.nan, order="C")
 
-    if arrival_cost is not None:
-        arrival_cost.reset()
-
     has_arrival = solver._arrival_slice is not None
+    dynamic_arrival = (
+        has_arrival
+        and getattr(solver, "_filter_kind", None) == "ekf"
+        and solver._W0_template is not None
+    )
+    filter_setup = _build_filter_setup(solver, has_arrival)
+    y_meas = np.ascontiguousarray(y.T, dtype=np.float64)
 
     pin_vals = None
     if solver._pin_u_idx and u is not None:
@@ -321,26 +372,6 @@ def run_c_solver(
     )
     unmeasured_ui = np.asarray(unmeasured, dtype=np.int32)
 
-    x_bar_stage = None
-    W0_stage = None
-    if (
-        has_arrival
-        and arrival_cost is not None
-        and arrival_cost.is_dynamic
-        and solver._W0_template is not None
-    ):
-        W0_template = np.asfortranarray(solver._W0_template, dtype=np.float64)
-        x_bar_stage, W0_stage = _precompute_arrival(
-            arrival_cost,
-            y,
-            u,
-            n_est,
-            nx_base,
-            W0_template,
-            solver._arrival_W_slice,
-            solver._arrival_state_idx,
-        )
-
     nu_ocp = solver._nu_ctrl + solver._nw
     cfg = _RunConfig(
         n_steps=n_steps,
@@ -355,7 +386,7 @@ def run_c_solver(
         n_arrival=int(solver._n_arrival) if has_arrival else 0,
         has_arrival=int(has_arrival),
         arrival_off=int(solver._arrival_slice.start) if has_arrival else 0,
-        dynamic_arrival=int(W0_stage is not None),
+        dynamic_arrival=int(dynamic_arrival),
         n_pin=len(solver._pin_u_idx) if pin_vals is not None else 0,
         n_u_extract=len(_u_extract_specs(solver)) // 3,
         n_rw=len(rw_idx),
@@ -400,12 +431,8 @@ def run_c_solver(
             capsule,
             ctypes.byref(cfg),
             _f64(yrefs).ctypes.data_as(_c_double_p),
-            _f64(x_bar_stage).ctypes.data_as(_c_double_p)
-            if x_bar_stage is not None
-            else None,
-            _f64(W0_stage).ctypes.data_as(_c_double_p)
-            if W0_stage is not None
-            else None,
+            None,
+            None,
             _f64(pin_vals).ctypes.data_as(_c_double_p) if pin_vals is not None else None,
             _i32(solver._controlled_idx).ctypes.data_as(_c_int_p),
             _u_extract_specs(solver).ctypes.data_as(_c_int_p),
@@ -421,6 +448,8 @@ def run_c_solver(
             if solver._arrival_state_idx is not None
             else None,
             u_meas.ctypes.data_as(_c_double_p) if u_meas is not None else None,
+            y_meas.ctypes.data_as(_c_double_p),
+            ctypes.byref(filter_setup) if filter_setup is not None else None,
             _f64(u_hat_rm).ctypes.data_as(_c_double_p),
             _f64(x_hat_rm).ctypes.data_as(_c_double_p),
             _f64(u_raw_rm).ctypes.data_as(_c_double_p),

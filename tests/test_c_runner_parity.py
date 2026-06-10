@@ -54,3 +54,33 @@ def test_c_solver_matches_python(arrival_factory):
     np.testing.assert_allclose(u_c[mask], u_py[mask], rtol=1e-5, atol=1e-5)
     mask_x = np.isfinite(x_py) & np.isfinite(x_c)
     np.testing.assert_allclose(x_c[mask_x], x_py[mask_x], rtol=1e-4, atol=0.05)
+
+
+def test_ekf_filter_matrices_cached_for_sparse_process():
+    """``build_mhe_solver`` stores plant filter matrices for in-C EKF arrival."""
+    pytest.importorskip("acados_template")
+    system = mhe.SystemModel.from_matrices(
+        np.diag([0.9, 0.8, 0.7]),
+        np.ones((3, 1)),
+        np.array([[1.0, 0.0, 0.0]]),
+        np.zeros((1, 1)),
+        is_discrete=True,
+        dt=0.01,
+    )
+    obj = mhe.ObjectiveBuilder()
+    obj.add(mhe.MeasurementTerm(mhe.L2Penalty(), mhe.NoiseWeight(1, cov=0.1)))
+    obj.add(
+        mhe.ProcessTerm(
+            mhe.L2Penalty(),
+            weight=mhe.NoiseWeight(3, cov=[0.01, 0.0, 0.02]),
+        )
+    )
+    obj.add(mhe.KnownInput([0]))
+    obj.add(mhe.EKFArrivalCost(system, builder=obj))
+    solver = mhe.build_mhe_solver(system, 3, obj, dt=0.01, already_discrete=True)
+    assert solver._filter_kind == "ekf"
+    assert solver._arrival_state_idx is not None
+    assert solver._filter_A.shape == (3, 3)
+    np.testing.assert_allclose(
+        np.diag(solver._filter_Q), [0.01, 0.0, 0.02], atol=0.0
+    )
