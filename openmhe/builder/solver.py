@@ -605,6 +605,8 @@ def build_mhe_solver(
     solver._nw = nw
     solver._nw_full = nw_full
     solver._G_proc = G_proc
+    solver._A_aug = A_aug
+    solver._B_aug = B_aug
     solver._N = N_horizon
     solver._builder = builder
     solver._arrival_slice = arrival_slice
@@ -665,7 +667,7 @@ def build_mhe_solver(
     return solver
 
 
-def run_solver(solver, y, u, post_steps=None):
+def run_solver(solver, y, u, post_steps=None, *, output_stage=None, stop_at_idx=None, require_success=False):
     """Run sliding-window MHE over a measurement sequence.
 
     Each window covers time indices ``[k - N, …, k - 1]``. Returned
@@ -685,11 +687,27 @@ def run_solver(solver, y, u, post_steps=None):
         the solver. Steps are skipped on failed solves (the corresponding
         column stays ``NaN``). If a step exposes a ``reset()`` method it is
         called once before the loop starts.
+    output_stage : int, optional
+        Horizon stage ``j ∈ {0, …, N-1}`` whose state/control is stored in
+        ``x_hat`` / ``u_hat`` for each window. Defaults to ``N - 1`` (trailing /
+        causal estimate). Use ``N // 2`` for a fixed-lag interior estimate that
+        uses later measurements inside the same window. Physical time index for
+        column ``idx`` is ``idx + output_stage``.
+    stop_at_idx : int, optional
+        When set, stop after successfully solving window ``stop_at_idx``
+        (inclusive). The solver object retains warm-start state and stage-0
+        ``W`` from that window.
+    require_success : bool
+        When ``True`` with ``stop_at_idx``, raise ``RuntimeError`` if that
+        window's solve fails.
     """
     n_steps = y.shape[1] if y.ndim > 1 else len(y)
     nu = solver._nu
     nx_base = solver._nx_base
     N = solver._N
+    out_stage = (N - 1) if output_stage is None else int(output_stage)
+    if not (0 <= out_stage < N):
+        raise ValueError(f"output_stage must be in [0, {N - 1}], got {out_stage}.")
     builder = solver._builder
     load_state_col = solver._load_state_col
     controlled_idx = solver._controlled_idx
@@ -808,21 +826,23 @@ def run_solver(solver, y, u, post_steps=None):
                 solver.set(j, "yref", yref)
 
         if solver.solve() != 0:
+            if require_success and stop_at_idx is not None and idx == stop_at_idx:
+                raise RuntimeError(f"MHE solve failed at window_idx={idx}.")
             continue
 
-        x_end = np.array(solver.get(N - 1, "x")).ravel()
-        u_full = np.array(solver.get(N - 1, "u")).ravel()
-        x_hat[:, idx] = x_end[:nx_base]
+        x_out = np.array(solver.get(out_stage, "x")).ravel()
+        u_full = np.array(solver.get(out_stage, "u")).ravel()
+        x_hat[:, idx] = x_out[:nx_base]
         for ui in controlled_idx:
             u_hat[ui, idx] = u_full[controlled_map[ui]]
         for ui, col in load_state_col.items():
-            u_hat[ui, idx] = x_end[col]
+            u_hat[ui, idx] = x_out[col]
         for ui, col in solver._col_sd1.items():
             if ui not in controlled_map:
-                u_hat[ui, idx] = x_end[col]
+                u_hat[ui, idx] = x_out[col]
         for ui, col in solver._col_fd1.items():
             if ui not in controlled_map and ui not in load_state_col:
-                u_hat[ui, idx] = x_end[col]
+                u_hat[ui, idx] = x_out[col]
 
         _u_hat_raw[:, idx] = u_hat[:, idx]
 
@@ -837,7 +857,7 @@ def run_solver(solver, y, u, post_steps=None):
                 nu=nu,
                 x_hat=x_hat,
                 u_hat=u_hat,
-                x_full=x_end,
+                x_full=x_out,
                 y=y,
                 u=u,
             )
@@ -852,6 +872,9 @@ def run_solver(solver, y, u, post_steps=None):
         for j in range(N - 1):
             solver.set(j, "x", np.array(solver.get(j + 1, "x")).ravel())
             solver.set(j, "u", np.array(solver.get(j + 1, "u")).ravel())
+
+        if stop_at_idx is not None and idx >= stop_at_idx:
+            break
 
     return u_hat, x_hat
 

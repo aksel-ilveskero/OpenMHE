@@ -51,6 +51,7 @@ class _RunConfig(ctypes.Structure):
         ("n_unmeasured", ctypes.c_int),
         ("lti_linear_ls_fast", ctypes.c_int),
         ("linear_ls", ctypes.c_int),
+        ("output_stage", ctypes.c_int),
     ]
 
 
@@ -255,6 +256,7 @@ def run_c_solver(
     u,
     post_steps=None,
     *,
+    output_stage: int | None = None,
     rebuild: bool = False,
     lti_linear_ls_fast: bool | None = None,
 ):
@@ -280,6 +282,9 @@ def run_c_solver(
         all-L2 builds with ``SQP_RTI``), window 0 runs a full Acados solve and
         condenses the QP left-hand side; later windows refresh QP vectors only.
         Requires ``nlp_solver_type='SQP_RTI'``; otherwise a warning is emitted and the full solve is used.  See ``openmhe/c_solver/README.md``.
+    output_stage : int, optional
+        Horizon stage whose solution is stored in ``x_hat`` / ``u_hat``. Defaults
+        to ``N - 1``. Column ``idx`` corresponds to physical time ``idx + output_stage``.
     
     Returns
     -------
@@ -360,6 +365,9 @@ def run_c_solver(
     nu = solver._nu
     nx_base = solver._nx_base
     N = solver._N
+    out_stage = (N - 1) if output_stage is None else int(output_stage)
+    if not (0 <= out_stage < N):
+        raise ValueError(f"output_stage must be in [0, {N - 1}], got {out_stage}.")
     n_est = n_steps - N
     if n_est <= 0:
         raise ValueError(
@@ -442,6 +450,7 @@ def run_c_solver(
             )
         ),
         linear_ls=int(getattr(solver, "_linear_ls", solver._cost_mode == "ls")),
+        output_stage=out_stage,
     )
 
     u_meas = None

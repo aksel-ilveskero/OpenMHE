@@ -412,3 +412,14 @@ def plant_process_cov(
         raise ValueError("Plant process covariance requires positive sparse weights.")
     cov_w = 1.0 / diag_w
     return Gp @ np.diag(cov_w) @ Gp.T
+
+
+def sparse_process_cov(G: np.ndarray, W_sparse: np.ndarray) -> np.ndarray:
+    """Map sparse inverse-covariance weights to full state process covariance ``G Q_w G.T``."""
+    G = np.asarray(G, dtype=float)
+    W = np.asarray(W_sparse, dtype=float)
+    diag_w = np.diag(W) if W.ndim == 2 else W
+    if np.any(diag_w <= 0):
+        raise ValueError("sparse_process_cov requires positive diagonal weights.")
+    Q_w = np.diag(1.0 / diag_w)
+    return G @ Q_w @ G.T

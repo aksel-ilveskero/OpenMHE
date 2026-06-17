@@ -44,6 +44,8 @@ typedef struct {
     int lti_linear_ls_fast;
     /** 1 when the problem was built with all-L2 ``LINEAR_LS`` penalties. */
     int linear_ls;
+    /** Horizon stage written to ``x_hat`` / ``u_hat`` (default ``N - 1`` when < 0). */
+    int output_stage;
 } openmhe_run_config_t;
 
 /**

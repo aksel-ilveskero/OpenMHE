@@ -35,6 +35,8 @@ from .mhe_strategies import (
     UnknownInput,
     SteadyStateArrivalCost,
     UKFArrivalCost,
+    fixed_interval_smoother_covariances,
+    kalman_present_covariance,
     noise_covs_from_builder,
     weight_from_lambda_u,
     L1Penalty,
@@ -45,7 +47,16 @@ from .mhe_strategies import (
     ProcessTerm,
     steady_state_cov,
 )
-from .builder import WindowStep, build_mhe_solver, run_c_solver, run_solver
+from .builder import (
+    WindowStep,
+    build_mhe_solver,
+    decision_hessian_at_window,
+    decision_variable_labels,
+    labels_to_names,
+    lti_ls_decision_hessian,
+    run_c_solver,
+    run_solver,
+)
 from .export import LatexSymbols, objective_to_latex
 from .paths import get_codegen_dir, get_data_root, get_mhe_json_dir, mhe_json_path
 from .frontend.acados_runtime import ensure_acados_environment
@@ -60,11 +71,17 @@ __all__ = [
     "SteadyStateArrivalCost",
     "EKFArrivalCost",
     "UKFArrivalCost",
+    "fixed_interval_smoother_covariances",
+    "kalman_present_covariance",
     "noise_covs_from_builder",
     "steady_state_cov",
     "BasePenalty",
     "WindowStep",
     "build_mhe_solver",
+    "decision_hessian_at_window",
+    "decision_variable_labels",
+    "labels_to_names",
+    "lti_ls_decision_hessian",
     "run_solver",
     "run_c_solver",
     "get_data_root",

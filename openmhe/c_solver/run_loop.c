@@ -401,6 +401,8 @@ int openmhe_mhe_run_sliding(
     const int nu = cfg->nu;
     const int nu_ctrl = cfg->nu_ctrl;
     const int ny_stage = cfg->ny_stage;
+    const int out_stage =
+        (cfg->output_stage >= 0 && cfg->output_stage < N) ? cfg->output_stage : (N - 1);
     const int ny0 = cfg->ny0;
     const int n_arrival = cfg->n_arrival;
     const int n_pin = cfg->n_pin;
@@ -627,8 +629,8 @@ int openmhe_mhe_run_sliding(
             continue;
         }
 
-        get_x(nlp_config, nlp_dims, nlp_out, N - 1, x_end);
-        get_u(nlp_config, nlp_dims, nlp_out, N - 1, u_full);
+        get_x(nlp_config, nlp_dims, nlp_out, out_stage, x_end);
+        get_u(nlp_config, nlp_dims, nlp_out, out_stage, u_full);
 
         memcpy(
             &x_hat[(size_t)idx * (size_t)nx_base], x_end,

@@ -5,6 +5,8 @@ from .arrival_cost import (
     EKFArrivalCost,
     SteadyStateArrivalCost,
     UKFArrivalCost,
+    kalman_present_covariance,
+    fixed_interval_smoother_covariances,
     noise_covs_from_builder,
     steady_state_cov,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "SteadyStateArrivalCost",
     "EKFArrivalCost",
     "UKFArrivalCost",
+    "fixed_interval_smoother_covariances",
+    "kalman_present_covariance",
     "noise_covs_from_builder",
     "steady_state_cov",
     "BasePenalty",

@@ -137,6 +137,148 @@ def steady_state_cov(
     return sla.solve_discrete_are(A.T, C.T, Q, R)
 
 
+def kalman_present_covariance(
+    A: np.ndarray,
+    C: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Steady-state Kalman predict and present (post-update) covariances.
+
+    Solves the DARE for the **a-priori** covariance ``P_pred`` (uncertainty before
+    the current measurement), then applies one Kalman update to obtain the
+    **a-posteriori** ``P_present`` (after assimilating ``y = C x + v``).
+
+    Uses the estimation form ``solve_discrete_are(A.T, C.T, Q, R)`` (same as
+    :func:`steady_state_cov`).
+    """
+    A = np.asarray(A, dtype=float)
+    C = np.asarray(C, dtype=float)
+    Q = np.asarray(Q, dtype=float)
+    R = np.asarray(R, dtype=float)
+    nx = A.shape[0]
+    P_pred = sla.solve_discrete_are(A.T, C.T, Q, R)
+    S = C @ P_pred @ C.T + R
+    K = P_pred @ C.T @ sla.inv(S)
+    P_present = (np.eye(nx) - K @ C) @ P_pred
+    return P_pred, P_present
+
+
+def _symmetrize_cov(P: np.ndarray) -> np.ndarray:
+    """Force a covariance matrix to be symmetric."""
+    return 0.5 * (P + P.T)
+
+
+def _observable_subspace(
+    P: np.ndarray,
+    *,
+    rcond: float = 1e-10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Eigenvectors / eigenvalues of ``P`` above a relative ``rcond`` cutoff."""
+    P = _symmetrize_cov(P)
+    evals, evecs = sla.eigh(P)
+    lam_ref = max(float(np.max(evals)), 1.0)
+    keep = evals > rcond * lam_ref
+    if not np.any(keep):
+        return evecs[:, :0], evals[:0]
+    return evecs[:, keep], evals[keep]
+
+
+def _cov_inv_observable(V: np.ndarray, evals: np.ndarray) -> np.ndarray:
+    """``P^+`` on the observable subspace of ``P = V diag(evals) V^T``."""
+    nx = V.shape[0]
+    if evals.size == 0:
+        return np.zeros((nx, nx))
+    return V @ np.diag(1.0 / evals) @ V.T
+
+
+def _project_observable(V: np.ndarray, M: np.ndarray) -> np.ndarray:
+    """Project a symmetric matrix onto the span of observable eigenvectors."""
+    if V.shape[1] == 0:
+        return np.zeros_like(M)
+    return V @ (V.T @ M @ V) @ V.T
+
+
+def _rts_smoothing_gain(
+    P_filt_k: np.ndarray,
+    A: np.ndarray,
+    P_pred_k: np.ndarray,
+) -> np.ndarray:
+    """RTS gain ``J = P_{k|k} A^T P_{k+1|k}^+`` on the observable subspace only."""
+    V, evals = _observable_subspace(P_pred_k)
+    Pinv = _cov_inv_observable(V, evals)
+    return P_filt_k @ A.T @ Pinv
+
+
+def fixed_interval_smoother_covariances(
+    A: np.ndarray,
+    C: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+    P0: np.ndarray,
+    N: int,
+) -> dict[str, list[np.ndarray]]:
+    """Fixed-horizon Kalman filter and RTS smoother error covariances.
+
+    Propagates covariances for ``N`` measurements ``y_0, …, y_{N-1}`` on the
+    model ``x_{k+1} = A x_k + w_k``, ``y_k = C x_k + v_k``.
+
+    Parameters
+    ----------
+    P0
+        Prior on ``x_0`` before the first in-window measurement (e.g. DARE
+        steady-state or arrival covariance).
+    N
+        Number of filter/smoother steps (match MHE horizon length).
+
+    Returns
+    -------
+    dict
+        ``P_filt[k]`` — filtered ``P_{k|k}``;
+        ``P_pred_ahead[k]`` — predicted ``P_{k+1|k}``;
+        ``P_smooth[k]`` — RTS smoothed ``P_{k|N-1}``.
+    """
+    if N < 1:
+        raise ValueError("N must be >= 1.")
+    A = np.asarray(A, dtype=float)
+    C = np.asarray(C, dtype=float)
+    Q = np.asarray(Q, dtype=float)
+    R = np.asarray(R, dtype=float)
+    P0 = np.asarray(P0, dtype=float)
+    nx = A.shape[0]
+    if P0.shape != (nx, nx):
+        raise ValueError(f"P0 must be ({nx}, {nx}), got {P0.shape}.")
+
+    P_filt: list[np.ndarray] = []
+    P_pred_ahead: list[np.ndarray] = []
+    P_minus = P0.copy()
+    I = np.eye(nx)
+
+    for _k in range(N):
+        S = C @ P_minus @ C.T + R
+        K = P_minus @ C.T @ sla.solve(S, np.eye(S.shape[0]), assume_a="pos")
+        IKC = I - K @ C
+        P_plus = IKC @ P_minus @ IKC.T + K @ R @ K.T
+        P_filt.append(_symmetrize_cov(P_plus))
+        P_pred_ahead.append(_symmetrize_cov(A @ P_plus @ A.T + Q))
+        P_minus = P_pred_ahead[-1]
+
+    P_smooth: list[np.ndarray] = [np.empty((0, 0))] * N
+    P_smooth[N - 1] = P_filt[N - 1].copy()
+    for k in range(N - 2, -1, -1):
+        V, _evals = _observable_subspace(P_pred_ahead[k])
+        J = _rts_smoothing_gain(P_filt[k], A, P_pred_ahead[k])
+        delta = _project_observable(V, P_smooth[k + 1] - P_pred_ahead[k])
+        P_smooth[k] = _symmetrize_cov(P_filt[k] + J @ delta @ J.T)
+
+    return {
+        "P_filt": P_filt,
+        "P_pred_ahead": P_pred_ahead,
+        "P_smooth": P_smooth,
+        "N": N,
+    }
+
+
 class BaseArrivalCost(ABC):
     """Arrival cost at the first stage of each MHE window."""
 
