@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../filter_arrival.h"
+#include "filter_arrival.h"
 
 static int approx_eq(double a, double b, double tol)
 {

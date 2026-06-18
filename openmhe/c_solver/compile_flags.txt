@@ -1,3 +1,4 @@
+-Iinclude
 -I../../c_generated_code
 -I/home/aksel/Code/acados/include
 -I/home/aksel/Code/acados/include/acados

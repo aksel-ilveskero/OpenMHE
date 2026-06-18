@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../filter_arrival.h"
+#include "filter_arrival.h"
 
 int main(void)
 {

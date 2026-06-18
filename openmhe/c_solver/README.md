@@ -11,7 +11,7 @@ Builds `libopenmhe_mhe_run.so` with `-O3 -march=native -ffast-math` (override vi
 make -C openmhe/c_solver CODEGEN_DIR=/path/to/c_generated_code ACADOS_DIR=/path/to/acados
 ```
 
-Rebuild after every codegen change (stack buffers in `run_loop.c` use `OPENMHE_MHE_*` from the generated header). `run_c_solver` rebuilds automatically when `acados_solver_openmhe_mhe.h` is newer than `run_loop.o`, or when called with `rebuild=True`.
+Rebuild after every codegen change (stack buffers in `src/run_loop.c` use `OPENMHE_MHE_*` from the generated header). `run_c_solver` rebuilds automatically when `acados_solver_openmhe_mhe.h` is newer than `build/run_loop.o`, or when called with `rebuild=True`.
 
 If you see a **dimension mismatch** (`status -3` / stale `libopenmhe_mhe_run.so`):
 
@@ -21,12 +21,14 @@ If you see a **dimension mismatch** (`status -3` / stale `libopenmhe_mhe_run.so`
 
 ## Source layout
 
-| File | Role |
+| Path | Role |
 |------|------|
-| `run_loop.c` / `run_loop.h` | Sliding-window driver: yref/pin setup, warm-start shift, per-window solve dispatch |
-| `lti_fast.c` / `lti_fast.h` | LTI + `LINEAR_LS` vector-only SQP-RTI step |
-| `profile.h` | Optional per-window timing (`OPENMHE_PROFILE=1`) |
-| `filter_arrival.h` | EKF/UKF arrival filter, null-space-aware `P^{-1}`, Cholesky utilities |
+| `src/run_loop.c` | Sliding-window driver: yref/pin setup, warm-start shift, per-window solve dispatch |
+| `include/run_loop.h` | Public API for the sliding-window driver |
+| `src/lti_fast.c` / `include/lti_fast.h` | LTI + `LINEAR_LS` vector-only SQP-RTI step |
+| `include/profile.h` | Optional per-window timing (`OPENMHE_PROFILE=1`) |
+| `src/filter_arrival.c` / `include/filter_arrival.h` | EKF/UKF arrival filter, null-space-aware `P^{-1}`, Cholesky utilities |
+| `build/` | Object files, `libopenmhe_mhe_run.so`, and unit-test binaries (generated) |
 
 ## Profiling
 
@@ -133,9 +135,9 @@ including `KnownInput`, EKF arrival, and non-RTI fallback.
 
 ```bash
 make -C openmhe/c_solver test
-./openmhe/c_solver/test/test_filter
-./openmhe/c_solver/test/test_inv
-./openmhe/c_solver/test/test_arrival_inv
+./openmhe/c_solver/build/test_filter
+./openmhe/c_solver/build/test_inv
+./openmhe/c_solver/build/test_arrival_inv
 ```
 
 ## Stack usage

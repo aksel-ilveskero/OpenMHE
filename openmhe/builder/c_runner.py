@@ -21,7 +21,7 @@ from openmhe.frontend.acados_runtime import (
 from openmhe.paths import get_codegen_dir
 
 _C_SOLVER_DIR = Path(__file__).resolve().parent.parent / "c_solver"
-_RUN_LIB = _C_SOLVER_DIR / "libopenmhe_mhe_run.so"
+_RUN_LIB = _C_SOLVER_DIR / "build" / "libopenmhe_mhe_run.so"
 
 _RUN_LIB_HANDLE: ctypes.CDLL | None = None
 _OCP_LIB_HANDLE: ctypes.CDLL | None = None
@@ -132,9 +132,9 @@ def _build_run_lib(*, force: bool = False) -> Path:
             f"No generated solver at {header}. Call build_mhe_solver() first."
         )
 
-    run_src = _C_SOLVER_DIR / "run_loop.c"
-    filter_src = _C_SOLVER_DIR / "filter_arrival.c"
-    run_obj = _C_SOLVER_DIR / "run_loop.o"
+    run_src = _C_SOLVER_DIR / "src" / "run_loop.c"
+    filter_src = _C_SOLVER_DIR / "src" / "filter_arrival.c"
+    run_obj = _C_SOLVER_DIR / "build" / "run_loop.o"
     stale_obj = run_obj.is_file() and run_obj.stat().st_mtime < header.stat().st_mtime
     if (
         not force
